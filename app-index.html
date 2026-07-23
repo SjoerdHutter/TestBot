@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0B1118">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Weerbot">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<title>Weerbot · maxtemperatuur in 15 steden</title>
+<script src="weer_data.js"></script>
+<style>
+  :root {
+    --bg:     #0B1118;
+    --paneel: #121A24;
+    --rand:   #1F2A38;
+    --inkt:   #E8EDF4;
+    --dim:    #8792A6;
+    --accent: #6FB3FF;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--inkt);
+    font-family: var(--sans);
+    min-height: 100vh;
+    padding: 22px 14px 48px;
+    padding-top: calc(20px + env(safe-area-inset-top, 2px));
+    padding-bottom: calc(40px + env(safe-area-inset-bottom, 8px));
+  }
+  .pagina { max-width: 1180px; margin: 0 auto; }
+
+  /* ── Koptekst ── */
+  .kop { margin-bottom: 18px; padding: 0 4px; }
+  .kop-titel {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--inkt);
+  }
+  .kop-titel span { color: var(--accent); }
+  .kop-sub {
+    margin-top: 5px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .kop-sub .ververs { color: var(--accent); }
+
+  .banner {
+    display: none;
+    background: rgba(227, 179, 65, 0.10);
+    border: 1px solid rgba(227, 179, 65, 0.45);
+    color: #E3B341;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+  }
+  .banner.zichtbaar { display: block; }
+
+  .laadtekst {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+    padding: 30px 4px;
+  }
+
+  /* ── Kaartgrid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 14px;
+  }
+  @media (max-width: 370px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .kaart {
+    background: var(--paneel);
+    border: 1px solid var(--rand);
+    border-radius: 14px;
+    padding: 16px 16px 12px;
+  }
+
+  .kaart-kop {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .stad-naam {
+    font-size: 16px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .klok {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .station-chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.10em;
+    color: var(--accent);
+    border: 1px solid rgba(111, 179, 255, 0.35);
+    border-radius: 5px;
+    padding: 2px 6px;
+  }
+  .oud-chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: #E3B341;
+    border: 1px solid rgba(227, 179, 65, 0.45);
+    border-radius: 5px;
+    padding: 2px 6px;
+  }
+
+  /* ── Dagkolommen ── */
+  .dagen {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+  .dag {
+    background: var(--bg);
+    border: 1px solid var(--rand);
+    border-radius: 10px;
+    padding: 10px 8px 9px;
+    text-align: center;
+  }
+  .dag-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+  .dag-temp {
+    font-family: var(--mono);
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .dag-temp .eenh {
+    font-size: 13px;
+    font-weight: 600;
+    vertical-align: 0.55em;
+    margin-left: 1px;
+    opacity: 0.75;
+  }
+  .dag-interval {
+    margin-top: 6px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .zeker-chip {
+    display: inline-block;
+    margin-top: 7px;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-radius: 4px;
+    padding: 2px 7px;
+  }
+  .z-hoog   { color: #57C48A; background: rgba(87, 196, 138, 0.12); }
+  .z-gem    { color: #E3B341; background: rgba(227, 179, 65, 0.12); }
+  .z-laag   { color: #E06C5B; background: rgba(224, 108, 91, 0.12); }
+  .dag-hist {
+    margin-top: 7px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .dag-wu {
+    margin-top: 3px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: #5E6B82;
+    white-space: nowrap;
+  }
+  .kaart-fout {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: #E06C5B;
+    line-height: 1.6;
+    padding: 6px 2px 4px;
+  }
+
+  /* ── Details ── */
+  details { margin-top: 11px; border-top: 1px solid var(--rand); padding-top: 9px; }
+  summary {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: var(--dim);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸ "; color: var(--accent); }
+  details[open] summary::before { content: "▾ "; }
+  .detail-blok {
+    margin-top: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.75;
+    color: var(--dim);
+  }
+  .detail-blok .w { color: var(--inkt); }
+  .detail-regel { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fout-pos { color: #E06C5B; }
+  .fout-neg { color: #6FB3FF; }
+  .fout-nul { color: #57C48A; }
+
+  /* ── Voettekst ── */
+  .voet {
+    margin-top: 26px;
+    padding: 0 4px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.8;
+    color: #5E6B82;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .kaart { transition: border-color 0.15s; }
+    .kaart:hover { border-color: #2B3A4E; }
+    summary { transition: color 0.15s; }
+    summary:hover { color: var(--inkt); }
+  }
+</style>
+</head>
+<body>
+<div class="pagina">
+
+  <div class="kop">
+    <div class="kop-titel">Weer<span>bot</span> · maxtemp briefing</div>
+    <div class="kop-sub" id="kopSub">gegevens ophalen…</div>
+  </div>
+
+  <div class="banner" id="meldBanner"></div>
+  <div class="laadtekst" id="laadTekst">Live ensembles ophalen bij Open‑Meteo voor 15 steden…</div>
+  <div class="grid" id="grid"></div>
+  <div class="voet" id="voet"></div>
+
+</div>
+
+<script>
+const CONFIG = {"peildatum": "2026-07-23", "steden": [{"key": "AMS", "naam": "Amsterdam", "station": "EHAM", "lat": 52.3086, "lon": 4.7639, "tz": "Europe/Amsterdam", "eenheid": "°C", "corr": -0.3, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.1, "2": 1.2}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 19.2, "echt": 20.0, "fout": 0.8, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 19.4, "echt": 20.0, "fout": 0.6, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 21.4, "echt": 21.0, "fout": -0.4, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 21.5, "echt": 21.0, "fout": -0.5, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 20.3, "echt": 20.0, "fout": -0.3, "bron": "backtest"}]}, {"key": "TYO", "naam": "Tokio", "station": "RJTT", "lat": 35.5533, "lon": 139.7811, "tz": "Asia/Tokyo", "eenheid": "°C", "corr": -0.1, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 0.9, "2": 1.1}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 34.8, "echt": 34.0, "fout": -0.8, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 35.0, "echt": 34.0, "fout": -1.0, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 35.9, "echt": 34.0, "fout": -1.9, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 36.0, "echt": 34.0, "fout": -2.0, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 34.1, "echt": 35.0, "fout": 0.9, "bron": "backtest"}]}, {"key": "LON", "naam": "Londen", "station": "EGLL", "lat": 51.4775, "lon": -0.4614, "tz": "Europe/London", "eenheid": "°C", "corr": -0.0, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 0.9, "2": 1.2}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 26.7, "echt": 27.0, "fout": 0.3, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 26.4, "echt": 27.0, "fout": 0.6, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 26.5, "echt": 24.0, "fout": -2.5, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 25.9, "echt": 24.0, "fout": -1.9, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 25.0, "echt": 26.0, "fout": 1.0, "bron": "backtest"}]}, {"key": "PAR", "naam": "Parijs", "station": "LFPG", "lat": 49.0097, "lon": 2.5479, "tz": "Europe/Paris", "eenheid": "°C", "corr": 0.0, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 0.9, "2": 0.9}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 26.3, "echt": 25.0, "fout": -1.3, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 25.9, "echt": 25.0, "fout": -0.9, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 25.7, "echt": 25.0, "fout": -0.7, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 25.5, "echt": 25.0, "fout": -0.5, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 24.0, "echt": 23.0, "fout": -1.0, "bron": "backtest"}]}, {"key": "NYC", "naam": "New York City", "station": "LGA", "lat": 40.7772, "lon": -73.8726, "tz": "America/New_York", "eenheid": "°F", "corr": -0.7, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.8, "2": 1.9}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 87.6, "echt": 88.0, "fout": 0.4, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 85.6, "echt": 88.0, "fout": 2.4, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 81.0, "echt": 82.0, "fout": 1.0, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 81.0, "echt": 82.0, "fout": 1.0, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 81.3, "echt": 82.0, "fout": 0.7, "bron": "backtest"}]}, {"key": "LAX", "naam": "Los Angeles", "station": "LAX", "lat": 33.9425, "lon": -118.4081, "tz": "America/Los_Angeles", "eenheid": "°F", "corr": -4.7, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 4.3, "2": 5.2}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 82.5, "echt": 77.0, "fout": -5.5, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 81.1, "echt": 77.0, "fout": -4.1, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 86.0, "echt": 81.0, "fout": -5.0, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 85.2, "echt": 81.0, "fout": -4.2, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 85.8, "echt": 81.0, "fout": -4.8, "bron": "backtest"}]}, {"key": "TOR", "naam": "Toronto", "station": "CYYZ", "lat": 43.6772, "lon": -79.6306, "tz": "America/Toronto", "eenheid": "°C", "corr": -0.2, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.0, "2": 1.2}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 20.4, "echt": 22.0, "fout": 1.6, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 20.6, "echt": 22.0, "fout": 1.4, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 27.3, "echt": 24.0, "fout": -3.3, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 26.2, "echt": 24.0, "fout": -2.2, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 26.5, "echt": 27.0, "fout": 0.5, "bron": "backtest"}]}, {"key": "VAN", "naam": "Vancouver", "station": "CYVR", "lat": 49.1939, "lon": -123.1844, "tz": "America/Vancouver", "eenheid": "°C", "corr": -1.2, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.7, "2": 1.7}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 31.1, "echt": 27.0, "fout": -4.1, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 31.4, "echt": 27.0, "fout": -4.4, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 29.2, "echt": 26.0, "fout": -3.2, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 30.1, "echt": 26.0, "fout": -4.1, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 28.1, "echt": 23.0, "fout": -5.1, "bron": "backtest"}]}, {"key": "SFO", "naam": "San Francisco", "station": "SFO", "lat": 37.6188, "lon": -122.375, "tz": "America/Los_Angeles", "eenheid": "°F", "corr": -3.3, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 2.7, "2": 4.8}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 79.6, "echt": 73.0, "fout": -6.6, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 74.1, "echt": 73.0, "fout": -1.1, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 87.3, "echt": 91.0, "fout": 3.7, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 81.7, "echt": 91.0, "fout": 9.3, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 76.2, "echt": 70.0, "fout": -6.2, "bron": "backtest"}]}, {"key": "MEX", "naam": "Mexico-Stad", "station": "MMMX", "lat": 19.4363, "lon": -99.0721, "tz": "America/Mexico_City", "eenheid": "°C", "corr": -0.5, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 0.9, "2": 1.0}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 27.3, "echt": 27.0, "fout": -0.3, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 27.1, "echt": 27.0, "fout": -0.1, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 26.6, "echt": 27.0, "fout": 0.4, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 27.4, "echt": 27.0, "fout": -0.4, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 26.9, "echt": 27.0, "fout": 0.1, "bron": "backtest"}]}, {"key": "HKG", "naam": "Hong Kong", "station": "VHHH", "lat": 22.3089, "lon": 113.9144, "tz": "Asia/Hong_Kong", "eenheid": "°C", "corr": 1.9, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.8, "2": 1.9}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 29.9, "echt": 32.0, "fout": 2.1, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 30.1, "echt": 32.0, "fout": 1.9, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 29.1, "echt": 31.0, "fout": 1.9, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 29.3, "echt": 31.0, "fout": 1.7, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 29.3, "echt": 30.0, "fout": 0.7, "bron": "backtest"}]}, {"key": "BKK", "naam": "Bangkok", "station": "VTBD", "lat": 13.9126, "lon": 100.6067, "tz": "Asia/Bangkok", "eenheid": "°C", "corr": 0.0, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 0.9, "2": 1.0}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 35.9, "echt": 35.0, "fout": -0.9, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 35.7, "echt": 35.0, "fout": -0.7, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 36.4, "echt": 35.0, "fout": -1.4, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 36.7, "echt": 35.0, "fout": -1.7, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 36.7, "echt": 36.0, "fout": -0.7, "bron": "backtest"}]}, {"key": "PEK", "naam": "Peking", "station": "ZBAA", "lat": 40.0801, "lon": 116.5846, "tz": "Asia/Shanghai", "eenheid": "°C", "corr": -0.3, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.3, "2": 1.3}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 30.2, "echt": 27.0, "fout": -3.2, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 27.2, "echt": 27.0, "fout": -0.2, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 30.2, "echt": 32.0, "fout": 1.8, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 31.1, "echt": 32.0, "fout": 0.9, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 28.7, "echt": 29.0, "fout": 0.3, "bron": "backtest"}]}, {"key": "SEL", "naam": "Seoul", "station": "RKSS", "lat": 37.5583, "lon": 126.7906, "tz": "Asia/Seoul", "eenheid": "°C", "corr": 0.8, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.1, "2": 1.2}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 28.3, "echt": 29.0, "fout": 0.7, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 29.1, "echt": 29.0, "fout": -0.1, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 26.9, "echt": 27.0, "fout": 0.1, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 26.5, "echt": 27.0, "fout": 0.5, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 25.5, "echt": 27.0, "fout": 1.5, "bron": "backtest"}]}, {"key": "DEL", "naam": "New Delhi", "station": "VIDP", "lat": 28.5562, "lon": 77.1, "tz": "Asia/Kolkata", "eenheid": "°C", "corr": -1.1, "corr_basis": "backtest", "corr_n": 90, "mae": {"1": 1.4, "2": 1.4}, "recent": [{"datum": "2026-07-22", "horizon": 2, "voorspeld": 31.4, "echt": 33.0, "fout": 1.6, "bron": "backtest"}, {"datum": "2026-07-22", "horizon": 1, "voorspeld": 33.0, "echt": 33.0, "fout": 0.0, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 2, "voorspeld": 30.7, "echt": 31.0, "fout": 0.3, "bron": "backtest"}, {"datum": "2026-07-21", "horizon": 1, "voorspeld": 30.8, "echt": 31.0, "fout": 0.2, "bron": "backtest"}, {"datum": "2026-07-20", "horizon": 2, "voorspeld": 33.1, "echt": 32.0, "fout": -1.1, "bron": "backtest"}]}]};
+</script>
+<script>
+(function () {
+  "use strict";
+  const MIN = "\u2212";
+  const grid = document.getElementById("grid");
+  const kopSub = document.getElementById("kopSub");
+  const banner = document.getElementById("meldBanner");
+  const laadTekst = document.getElementById("laadTekst");
+  let laatsteFetch = 0;
+  let bezig = false;
+
+  /* ── Hulpfuncties ── */
+  function nl(x, dec) {
+    if (x === null || x === undefined) return "?";
+    return x.toFixed(dec === undefined ? 1 : dec).replace(".", ",").replace("-", MIN);
+  }
+  function metTeken(x, dec) { return (x >= 0 ? "+" : "") + nl(x, dec); }
+  function heel(x) { return String(Math.round(x)).replace("-", MIN); }
+
+  function tint(v, eenheid) {
+    let c = eenheid === "\u00B0F" ? (v - 32) * 5 / 9 : v;
+    let n = Math.min(1, Math.max(0, (c + 5) / 45));
+    const hue = 210 - n * 185;
+    const sat = 58 + n * 27;
+    const lig = 67 - n * 5;
+    return "hsl(" + hue.toFixed(0) + " " + sat.toFixed(0) + "% " + lig.toFixed(0) + "%)";
+  }
+
+  function isoInTz(tz, offsetDagen) {
+    const t = new Date(Date.now() + (offsetDagen || 0) * 86400000);
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit"
+    }).format(t);
+  }
+  function datumKort(iso) {
+    return new Intl.DateTimeFormat("nl-BE", { day: "numeric", month: "short" })
+      .format(new Date(iso + "T12:00:00"));
+  }
+  function zekerheid(p10, p90, eenheid) {
+    const d = p90 - p10;
+    const f = eenheid === "\u00B0F";
+    if (d <= (f ? 5 : 3))  return ["hoog", "z-hoog"];
+    if (d <= (f ? 10 : 6)) return ["gemiddeld", "z-gem"];
+    return ["laag", "z-laag"];
+  }
+  const HORIZON_NAAM = { 0: "vandaag", 1: "morgen", 2: "overm." };
+
+  function bewaarCache(obj) {
+    try { localStorage.setItem("weerbot-cache", JSON.stringify(obj)); } catch (e) {}
+  }
+  function leesCache() {
+    try { return JSON.parse(localStorage.getItem("weerbot-cache")); } catch (e) { return null; }
+  }
+
+  /* ── Historie: ingebouwde backtest, overschreven door weer_data.js als die aanwezig en nieuwer is ── */
+  const OVERRIDE = (function () {
+    const W = window.WEER_DATA;
+    if (!W || !W.steden || !W.gegenereerd) return null;
+    if (W.gegenereerd.slice(0, 10) < CONFIG.peildatum) return null;
+    const per = {};
+    W.steden.forEach(function (s) {
+      const mae = {};
+      (s.dagen || []).slice(0, 3).forEach(function (d, h) {
+        if (d && d.hist) mae[h] = d.hist.mae;
+      });
+      const wu = {};
+      (s.dagen || []).forEach(function (d) {
+        if (d && d.wu !== null && d.wu !== undefined) wu[d.datum] = d.wu;
+      });
+      per[s.key] = {
+        corr: s.correctie.waarde, basis: s.correctie.basis, n: s.correctie.n,
+        mae: mae, recent: (s.recent || []).slice(0, 5), wu: wu
+      };
+    });
+    return { datum: W.gegenereerd.slice(0, 10), per: per };
+  })();
+
+  function histVan(s) {
+    const o = OVERRIDE && OVERRIDE.per[s.key];
+    return {
+      corr:  o ? o.corr  : s.corr,
+      basis: o ? o.basis : s.corr_basis,
+      n:     o ? o.n     : s.corr_n,
+      mae:   o ? o.mae   : s.mae,
+      recent: o ? o.recent : s.recent,
+      wu:    o ? o.wu    : {},
+      datum: OVERRIDE ? OVERRIDE.datum : CONFIG.peildatum
+    };
+  }
+
+  /* ── Live ensemble ophalen ── */
+  function haalStad(s) {
+    const url = "https://ensemble-api.open-meteo.com/v1/ensemble" +
+      "?latitude=" + s.lat + "&longitude=" + s.lon +
+      "&daily=temperature_2m_max" +
+      "&models=ecmwf_ifs025,ecmwf_aifs025,ncep_gefs025,icon_seamless" +
+      "&temperature_unit=" + (s.eenheid === "\u00B0F" ? "fahrenheit" : "celsius") +
+      "&forecast_days=3&timezone=" + encodeURIComponent(s.tz);
+    return fetch(url).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (j) {
+      const daily = j.daily || {};
+      const datums = daily.time || [];
+      const leden = [];
+      for (const k in daily) {
+        if (k.indexOf("temperature_2m_max") === 0) leden.push(daily[k]);
+      }
+      const h = histVan(s);
+      const dagen = [];
+      datums.slice(0, 3).forEach(function (datum, i) {
+        const vals = leden.map(function (m) { return m[i]; })
+          .filter(function (v) { return v !== null && v !== undefined; })
+          .sort(function (a, b) { return a - b; });
+        if (!vals.length) return;
+        const mean = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+        const q = function (p) { return vals[Math.round((vals.length - 1) * p)]; };
+        dagen.push({
+          datum: datum,
+          verwachting: mean + h.corr,
+          p10: q(0.1) + h.corr,
+          p90: q(0.9) + h.corr,
+          n_leden: vals.length
+        });
+      });
+      if (!dagen.length) throw new Error("geen bruikbare leden");
+      return dagen;
+    });
+  }
+
+  /* ── Kaart bouwen ── */
+  function bouwKaart(s, dagen, foutTekst) {
+    const h = histVan(s);
+    const vandaag = isoInTz(s.tz, 0);
+    const labelMap = {};
+    labelMap[vandaag]          = "vandaag";
+    labelMap[isoInTz(s.tz, 1)] = "morgen";
+    labelMap[isoInTz(s.tz, 2)] = "overmorgen";
+
+    let midden = "";
+    let kaartOud = false;
+
+    if (dagen && dagen.length) {
+      kaartOud = dagen[0].datum < vandaag;
+      let dagenHtml = "";
+      dagen.slice(0, 3).forEach(function (d, i) {
+        const lbl = labelMap[d.datum] || datumKort(d.datum);
+        const z = zekerheid(d.p10, d.p90, s.eenheid);
+        const mae = h.mae[i] !== undefined ? h.mae[i] : h.mae[String(i)];
+        const histHtml = (mae !== undefined && mae !== null)
+          ? "misser \u00B1" + nl(mae) + "\u00B0"
+          : "geen backtest";
+        const wuVal = h.wu[d.datum];
+        const wuHtml = (wuVal !== undefined)
+          ? '<div class="dag-wu">WU ' + heel(wuVal) + "\u00B0</div>"
+          : "";
+        dagenHtml +=
+          '<div class="dag">' +
+            '<div class="dag-label">' + lbl + "</div>" +
+            '<div class="dag-temp" style="color:' + tint(d.verwachting, s.eenheid) + '">' +
+              heel(d.verwachting) + '<span class="eenh">' + s.eenheid + "</span>" +
+            "</div>" +
+            '<div class="dag-interval">80%: ' + heel(d.p10) + " tot " + heel(d.p90) + "</div>" +
+            '<div><span class="zeker-chip ' + z[1] + '">' + z[0] + "</span></div>" +
+            '<div class="dag-hist">' + histHtml + "</div>" +
+            wuHtml +
+          "</div>";
+      });
+      midden = '<div class="dagen">' + dagenHtml + "</div>";
+    } else {
+      midden = '<div class="kaart-fout">Geen verbinding met Open\u2011Meteo' +
+        (foutTekst ? " (" + foutTekst + ")" : "") + ". Tik bovenin op vernieuwen.</div>";
+    }
+
+    let recentHtml = "";
+    (h.recent || []).forEach(function (r) {
+      const fk = r.fout > 0.05 ? "fout-pos" : (r.fout < -0.05 ? "fout-neg" : "fout-nul");
+      recentHtml +=
+        '<div class="detail-regel">' + datumKort(r.datum) +
+        " \u00B7 " + (HORIZON_NAAM[r.horizon] || "h" + r.horizon) +
+        ' \u00B7 voorspeld <span class="w">' + nl(r.voorspeld) + "</span>" +
+        ' \u00B7 echt <span class="w">' + nl(r.echt) + "</span>" +
+        ' \u00B7 <span class="' + fk + '">' + metTeken(r.fout) + "\u00B0</span></div>";
+    });
+    if (!recentHtml) recentHtml = '<div class="detail-regel">nog geen geverifieerde dagen</div>';
+
+    const corrHtml =
+      '<div class="detail-regel">correctie <span class="w">' + metTeken(h.corr) +
+      "\u00B0</span> \u00B7 bron " + h.basis + " \u00B7 n=" + h.n + "</div>" +
+      '<div class="detail-regel">controles bijgewerkt op ' + datumKort(h.datum) + "</div>";
+
+    const kaart = document.createElement("div");
+    kaart.className = "kaart";
+    kaart.innerHTML =
+      '<div class="kaart-kop">' +
+        '<div class="stad-naam">' + s.naam + "</div>" +
+        '<div class="klok" data-tz="' + s.tz + '"></div>' +
+        (kaartOud ? '<div class="oud-chip">verouderd</div>' : "") +
+        '<div class="station-chip">' + s.station + "</div>" +
+      "</div>" +
+      midden +
+      "<details><summary>model en controles</summary>" +
+        '<div class="detail-blok">' + corrHtml + recentHtml + "</div>" +
+      "</details>";
+    return kaart;
+  }
+
+  /* ── Verversen ── */
+  function ververs() {
+    if (bezig) return;
+    bezig = true;
+    kopSub.innerHTML = "15 stations \u00B7 ophalen\u2026";
+    banner.classList.remove("zichtbaar");
+
+    const cache = leesCache();
+    const cachePer = (cache && cache.per) || {};
+
+    Promise.allSettled(CONFIG.steden.map(haalStad)).then(function (uitkomsten) {
+      grid.innerHTML = "";
+      laadTekst.style.display = "none";
+      let gelukt = 0;
+      let uitCache = 0;
+      const nieuwCache = { t: Date.now(), per: {} };
+
+      CONFIG.steden.forEach(function (s, i) {
+        const u = uitkomsten[i];
+        if (u.status === "fulfilled") {
+          gelukt++;
+          nieuwCache.per[s.key] = u.value;
+          grid.appendChild(bouwKaart(s, u.value));
+        } else if (cachePer[s.key]) {
+          uitCache++;
+          nieuwCache.per[s.key] = cachePer[s.key];
+          grid.appendChild(bouwKaart(s, cachePer[s.key]));
+        } else {
+          grid.appendChild(bouwKaart(s, null, String(u.reason && u.reason.message || "").slice(0, 40)));
+        }
+      });
+
+      if (gelukt) {
+        laatsteFetch = Date.now();
+        bewaarCache(nieuwCache);
+      }
+      const tijd = new Intl.DateTimeFormat("nl-BE", { hour: "2-digit", minute: "2-digit" })
+        .format(new Date(gelukt ? Date.now() : (cache && cache.t) || Date.now()));
+      kopSub.innerHTML = CONFIG.steden.length + " stations \u00B7 ensemble 173 leden \u00B7 " +
+        (gelukt ? "live " + tijd : "offline") + ' \u00B7 <span class="ververs">vernieuwen</span>';
+
+      if (!gelukt && uitCache) {
+        banner.textContent = "Geen verbinding. Je ziet de laatst opgehaalde voorspellingen van " +
+          new Intl.DateTimeFormat("nl-BE", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+            .format(new Date(cache.t)) + ".";
+        banner.classList.add("zichtbaar");
+      } else if (!gelukt) {
+        banner.textContent = "Geen verbinding met Open\u2011Meteo en nog geen eerdere gegevens op dit toestel.";
+        banner.classList.add("zichtbaar");
+      } else if (uitCache) {
+        banner.textContent = "Voor " + uitCache + " stad(en) lukte het ophalen niet, daar zie je de vorige gegevens.";
+        banner.classList.add("zichtbaar");
+      }
+
+      tikKlokken();
+      bezig = false;
+    });
+  }
+
+  kopSub.addEventListener("click", ververs);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible" && Date.now() - laatsteFetch > 30 * 60 * 1000) {
+      ververs();
+    }
+  });
+
+  /* ── Voettekst en klokken ── */
+  document.getElementById("voet").innerHTML =
+    "Verwachting is het biasgecorrigeerde ensemblegemiddelde, 80% is het p10 tot p90 bereik van de leden.<br>" +
+    "Misser is de gemiddelde absolute fout uit de backtest voor die stad en horizon.<br>" +
+    "Modellen: ECMWF IFS + AIFS, NCEP GEFS, ICON via Open\u2011Meteo \u00B7 correcties geleerd tegen METAR stationswaarnemingen.";
+
+  const klokFmt = {};
+  function tikKlokken() {
+    document.querySelectorAll(".klok").forEach(function (el) {
+      const tz = el.getAttribute("data-tz");
+      if (!klokFmt[tz]) {
+        klokFmt[tz] = new Intl.DateTimeFormat("nl-BE", { timeZone: tz, hour: "2-digit", minute: "2-digit" });
+      }
+      el.textContent = klokFmt[tz].format(new Date());
+    });
+  }
+  setInterval(tikKlokken, 30000);
+
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    navigator.serviceWorker.register("./sw.js").catch(function () {});
+  }
+
+  ververs();
+})();
+</script>
+</body>
+</html>
