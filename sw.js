@@ -1,5 +1,5 @@
-const VERSIE = "weerbot-v1";
-const SCHIL = ["./", "./index.html", "./manifest.webmanifest", "./weer_data.js", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
+const VERSIE = "weerbot-v3";
+const SCHIL = ["./", "./index.html", "./manifest.webmanifest", "./weer_data.js", "./app_params.js", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", function (e) {
   e.waitUntil(
