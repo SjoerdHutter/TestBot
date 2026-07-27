@@ -1,0 +1,34 @@
+name: Dagelijkse voorspellingslog
+
+on:
+  schedule:
+    - cron: "20 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: logboek
+  cancel-in-progress: false
+
+jobs:
+  loggen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Voorspellingen loggen
+        run: python bot/logger.py
+      - name: Wijzigingen terugzetten
+        run: |
+          git config user.name "weerbot"
+          git config user.email "weerbot@users.noreply.github.com"
+          git add logs/
+          git diff --cached --quiet && echo "Niets te loggen" && exit 0
+          git commit -m "Dagelijkse voorspellingslog"
+          git pull --rebase origin main
+          git push
