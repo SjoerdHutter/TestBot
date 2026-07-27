@@ -212,6 +212,16 @@ Blijft de chip na een herijking terugkomen, dan is er iets structurelers aan de 
 
 **6. CUSUM getest en afgewezen.** De voorgestelde CUSUM driftdetector is op 220 dagen echte data vergeleken met de bestaande z toets: de z toets vangt 86% van de haalbare herijkingswinst bij 29% vuren, de beste CUSUM haalde 65% bij 35% vuren. De z toets blijft dus, nu met cijfers onderbouwd.
 
+## Waarom je geen 429 meer krijgt
+
+Bij 51 steden deed de app per stad losse aanroepen: 51 voor de voorspellingen en nog eens ruim honderd voor de dagelijkse controle. Open-Meteo beantwoordt dat met **HTTP 429, te veel verzoeken**, waarna een deel van de steden leeg bleef.
+
+Twee dingen zijn veranderd. Open-Meteo accepteert veel locaties in één aanroep, dus alle steden worden nu gebundeld opgehaald: één verzoek voor de elf Fahrenheit-steden en twee voor de rest, met per locatie automatisch de juiste tijdzone. En elk verzoek dat toch een 429 of 503 terugkrijgt wordt vanzelf opnieuw geprobeerd, met oplopende wachttijd (ongeveer 1,5, 3 en 6 seconden plus wat ruis) zodat de pieken uit elkaar lopen.
+
+Gemeten in een test met alle 51 steden: het aantal aanroepen ging van 153 naar 30 bij het opstarten, en een verversing daarna kost er nog maar 3. Tijdens die test kwamen er zeven 429-antwoorden binnen; die zijn allemaal met een herkansing opgevangen, zonder één foutmelding in het logboek.
+
+De opgehaalde controlegegevens blijven een dag in het geheugen staan, zodat een herijking niet opnieuw hetzelfde ophaalt.
+
 ## De kalibratie verversen
 
 De correcties komen uit `kalibratie.py` in de computermap (naast `weer.py`). Draai af en toe, bijvoorbeeld maandelijks:

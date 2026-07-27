@@ -1,4 +1,4 @@
-const VERSIE = "weerbot-v10";
+const VERSIE = "weerbot-v11";
 const SCHIL = ["./", "./index.html", "./manifest.webmanifest", "./app_params.js", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 
 self.addEventListener("install", function (e) {

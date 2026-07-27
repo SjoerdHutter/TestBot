@@ -920,6 +920,75 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     });
   }
 
+  /* ── Gebundeld ophalen: Open\u2011Meteo accepteert veel locaties in een aanroep,
+     wat 51 losse verzoeken terugbrengt tot twee (een per eenheid). ── */
+  const BUNDEL_MAX = 25;
+
+  function haalMetHerkansing(url, pogingen) {
+    pogingen = pogingen || 4;
+    function poging(n) {
+      return fetch(url).then(function (r) {
+        if (r.status === 429 || r.status === 503) {
+          if (n >= pogingen) throw new Error("HTTP " + r.status);
+          const wacht = 1500 * Math.pow(2, n) + Math.random() * 800;
+          return new Promise(function (res) { setTimeout(res, wacht); }).then(function () {
+            return poging(n + 1);
+          });
+        }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+    }
+    return poging(0);
+  }
+
+  /* Roept `bouw(groep)` aan per groep van hoogstens BUNDEL_MAX steden met dezelfde
+     eenheid, en legt het antwoord per stadssleutel klaar in `bak`. */
+  function bundel(steden, bouw, bak) {
+    const groepen = [];
+    const nodig = steden.filter(function (s) { return !bak[s.key]; });
+    if (!nodig.length) return Promise.resolve();
+    ["\u00B0F", "\u00B0C"].forEach(function (eenheid) {
+      const lijst = nodig.filter(function (s) { return s.eenheid === eenheid; });
+      for (let i = 0; i < lijst.length; i += BUNDEL_MAX) {
+        groepen.push(lijst.slice(i, i + BUNDEL_MAX));
+      }
+    });
+    return Promise.all(groepen.map(function (groep) {
+      return haalMetHerkansing(bouw(groep)).then(function (j) {
+        const lijst = Array.isArray(j) ? j : [j];
+        groep.forEach(function (s, i) { if (lijst[i]) bak[s.key] = lijst[i]; });
+      }).catch(function () { /* deze groep valt terug op los ophalen */ });
+    }));
+  }
+
+  function coord(groep) {
+    return "?latitude=" + groep.map(function (s) { return s.lat; }).join(",") +
+           "&longitude=" + groep.map(function (s) { return s.lon; }).join(",");
+  }
+  function eenheidVan(groep) {
+    return groep[0].eenheid === "\u00B0F" ? "fahrenheit" : "celsius";
+  }
+
+  const ENS_BAK = {}, PREV_BAK = {}, HIST_BAK = {};
+  let bakDag = null;
+  function verversBakken() {
+    const nu = isoDag(new Date());
+    if (bakDag === nu) return;
+    bakDag = nu;
+    [PREV_BAK, HIST_BAK].forEach(function (b) { for (const k in b) delete b[k]; });
+  }
+
+  function bundelVoorspellingen(steden) {
+    for (const k in ENS_BAK) delete ENS_BAK[k];
+    return bundel(steden, function (groep) {
+      return "https://ensemble-api.open-meteo.com/v1/ensemble" + coord(groep) +
+        "&daily=temperature_2m_max&models=" + ENS_MODELLEN.join(",") +
+        "&temperature_unit=" + eenheidVan(groep) +
+        "&forecast_days=3&timezone=auto";
+    }, ENS_BAK);
+  }
+
   /* ── Live ensemble per stad ── */
   function haalStad(s) {
     const url = "https://ensemble-api.open-meteo.com/v1/ensemble" +
@@ -927,10 +996,10 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       "&daily=temperature_2m_max&models=" + ENS_MODELLEN.join(",") +
       "&temperature_unit=" + (s.eenheid === "\u00B0F" ? "fahrenheit" : "celsius") +
       "&forecast_days=3&timezone=" + encodeURIComponent(s.tz);
-    return fetch(url).then(function (r) {
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return r.json();
-    }).then(function (j) {
+    const bron = ENS_BAK[s.key]
+      ? Promise.resolve(ENS_BAK[s.key])
+      : haalMetHerkansing(url);
+    return bron.then(function (j) {
       const daily = j.daily || {};
       const datums = daily.time || [];
       const perModel = {};   // ensemblemodel -> [ledenreeksen]
@@ -1120,17 +1189,17 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     const unit = s.eenheid === "\u00B0F" ? "fahrenheit" : "celsius";
     const tz = encodeURIComponent(s.tz);
 
-    const prevP = fetch("https://previous-runs-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
-      "&longitude=" + s.lon + "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2" +
-      "&models=" + KAL_MODELLEN.join(",") + "&temperature_unit=" + unit +
-      "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz)
-      .then(function (r) { if (!r.ok) throw new Error("prev"); return r.json(); });
+    const prevP = PREV_BAK[s.key] ? Promise.resolve(PREV_BAK[s.key]) :
+      haalMetHerkansing("https://previous-runs-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
+        "&longitude=" + s.lon + "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2" +
+        "&models=" + KAL_MODELLEN.join(",") + "&temperature_unit=" + unit +
+        "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz);
 
-    const histP = fetch("https://historical-forecast-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
-      "&longitude=" + s.lon + "&daily=temperature_2m_max&models=" + KAL_MODELLEN.join(",") +
-      "&temperature_unit=" + unit + "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz)
-      .then(function (r) { if (!r.ok) throw new Error("hist"); return r.json(); })
-      .catch(function () { return null; });
+    const histP = HIST_BAK[s.key] ? Promise.resolve(HIST_BAK[s.key]) :
+      haalMetHerkansing("https://historical-forecast-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
+        "&longitude=" + s.lon + "&daily=temperature_2m_max&models=" + KAL_MODELLEN.join(",") +
+        "&temperature_unit=" + unit + "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz)
+        .catch(function () { return null; });
 
     const st = metarVan(s);
     const actP = (st
@@ -1247,7 +1316,27 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         volgende();
       });
     }
-    for (let k = 0; k < Math.min(3, wachtrij.length); k++) volgende();
+    verversBakken();
+    const teDoen = wachtrij.slice();
+    const eindD = teDoen.length ? isoInTz(teDoen[0].tz, 0) : null;   // een dag ruimer:
+    const beginD = eindD ? isoMin(eindD, VERIF_VENSTER + 2) : null;  // dekt alle tijdzones
+    const klaarMet = !beginD ? Promise.resolve() : Promise.all([
+      bundel(teDoen, function (groep) {
+        return "https://previous-runs-api.open-meteo.com/v1/forecast" + coord(groep) +
+          "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2&models=" +
+          KAL_MODELLEN.join(",") + "&temperature_unit=" + eenheidVan(groep) +
+          "&start_date=" + beginD + "&end_date=" + eindD + "&timezone=auto";
+      }, PREV_BAK),
+      bundel(teDoen, function (groep) {
+        return "https://historical-forecast-api.open-meteo.com/v1/forecast" + coord(groep) +
+          "&daily=temperature_2m_max&models=" + KAL_MODELLEN.join(",") +
+          "&temperature_unit=" + eenheidVan(groep) +
+          "&start_date=" + beginD + "&end_date=" + eindD + "&timezone=auto";
+      }, HIST_BAK),
+    ]);
+    klaarMet.then(function () {
+      for (let k = 0; k < Math.min(3, wachtrij.length); k++) volgende();
+    });
   }
 
   function sparkSvg(rijen, h, maeBack) {
@@ -1881,9 +1970,11 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     const cache = lees("weerbot-cache-v2");
     const cachePer = (cache && cache.per) || {};
 
-    beperkt(steden.map(function (s) {
-      return function () { return haalStad(s).then(function (u) { return haalNws(s, u); }); };
-    }), 8).then(function (uitkomsten) {
+    bundelVoorspellingen(steden).then(function () {
+      return beperkt(steden.map(function (s) {
+        return function () { return haalStad(s).then(function (u) { return haalNws(s, u); }); };
+      }), 6);
+    }).then(function (uitkomsten) {
       laadTekst.style.display = "none";
       let gelukt = 0, uitCache = 0;
       const nieuwCache = { t: Date.now(), per: {} };
