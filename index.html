@@ -325,6 +325,13 @@
   .z-gem  { color: #E3B341; background: rgba(227, 179, 65, 0.12); }
   .z-laag { color: #E06C5B; background: rgba(224, 108, 91, 0.12); }
   .dag-hist { margin-top: 7px; font-family: var(--mono); font-size: 10px; color: var(--dim); white-space: nowrap; }
+  .dag-piek {
+    font-family: var(--mono); font-size: 0.62rem; color: var(--dim);
+    margin-top: 3px; letter-spacing: 0.02em; white-space: nowrap;
+  }
+  .dag-piek.voorbij { color: #4A5468; }
+  .rij-temp { min-width: 44px; }
+
   .dag-wu { margin-top: 3px; font-family: var(--mono); font-size: 10px; color: #5E6B82; white-space: nowrap; }
   .kaart-fout { font-family: var(--mono); font-size: 11px; color: #E06C5B; line-height: 1.6; padding: 6px 2px 4px; }
 
@@ -970,13 +977,70 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     return groep[0].eenheid === "\u00B0F" ? "fahrenheit" : "celsius";
   }
 
-  const ENS_BAK = {}, PREV_BAK = {}, HIST_BAK = {};
+  const ENS_BAK = {}, PREV_BAK = {}, HIST_BAK = {}, UUR_BAK = {};
   let bakDag = null;
   function verversBakken() {
     const nu = isoDag(new Date());
     if (bakDag === nu) return;
     bakDag = nu;
     [PREV_BAK, HIST_BAK].forEach(function (b) { for (const k in b) delete b[k]; });
+  }
+
+  /* Uurlijkse curve van de vijf modelsystemen: levert het verwachte tijdstip
+     van de dagpiek. Klein bestand, ongeveer 90 kB voor 25 steden. */
+  function bundelUren(steden) {
+    for (const k in UUR_BAK) delete UUR_BAK[k];
+    return bundel(steden, function (groep) {
+      return "https://api.open-meteo.com/v1/forecast" + coord(groep) +
+        "&hourly=temperature_2m&models=" + KAL_MODELLEN.join(",") +
+        "&temperature_unit=" + eenheidVan(groep) +
+        "&forecast_days=3&timezone=auto";
+    }, UUR_BAK);
+  }
+
+  /* {datum: {uur, lo, hi}} \u2014 uur van de piek in het modelgemiddelde,
+     lo/hi is de spreiding van dat tijdstip tussen de modellen. */
+  function piekenUit(j) {
+    const H = (j && j.hourly) || {};
+    const tijden = H.time || [];
+    const reeksen = [];
+    for (const k in H) {
+      if (k.indexOf("temperature_2m") === 0 && Array.isArray(H[k])) reeksen.push(H[k]);
+    }
+    if (!tijden.length || !reeksen.length) return {};
+    const perDag = {};
+    tijden.forEach(function (ts, idx) {
+      const vals = [];
+      reeksen.forEach(function (r) {
+        const x = r[idx];
+        if (x !== null && x !== undefined) vals.push(x);
+      });
+      if (!vals.length) return;
+      let som = 0;
+      vals.forEach(function (x) { som += x; });
+      (perDag[ts.slice(0, 10)] = perDag[ts.slice(0, 10)] || [])
+        .push({ uur: parseInt(ts.slice(11, 13), 10), gem: som / vals.length, vals: vals });
+    });
+    const uit = {};
+    for (const dag in perDag) {
+      const rij = perDag[dag];
+      if (rij.length < 6) continue;          // te weinig uren, geen betrouwbare piek
+      let beste = rij[0];
+      rij.forEach(function (x) { if (x.gem > beste.gem) beste = x; });
+      let aantal = 0;
+      rij.forEach(function (x) { aantal = Math.max(aantal, x.vals.length); });
+      const arg = [];
+      for (let m = 0; m < aantal; m++) {
+        let bu = null, bv = null;
+        rij.forEach(function (x) {
+          if (x.vals.length > m && (bv === null || x.vals[m] > bv)) { bv = x.vals[m]; bu = x.uur; }
+        });
+        if (bu !== null) arg.push(bu);
+      }
+      uit[dag] = { uur: beste.uur,
+                   lo: Math.min.apply(null, arg), hi: Math.max.apply(null, arg) };
+    }
+    return uit;
   }
 
   function bundelVoorspellingen(steden) {
@@ -999,6 +1063,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     const bron = ENS_BAK[s.key]
       ? Promise.resolve(ENS_BAK[s.key])
       : haalMetHerkansing(url);
+    const pieken = piekenUit(UUR_BAK[s.key]);
     return bron.then(function (j) {
       const daily = j.daily || {};
       const datums = daily.time || [];
@@ -1075,6 +1140,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         }
         dagen.push({ datum: datum, verwachting: verw, p10: verw + lo, p90: verw + hi,
                      n_leden: pool.length, gekalibreerd: gekalibreerd,
+                     piek: (pieken && pieken[datum]) || null,
                      verbreed: gekalibreerd && (dLid10 < bLo || dLid90 > bHi) });
       });
       if (!dagen.length) throw new Error("geen bruikbare leden");
@@ -1469,6 +1535,13 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
                "% mee op vandaag en morgen (\u2713), gewicht wordt geleerd zodra de log volloopt</div>";
       }
     }
+    const dg = (LAATSTE || []).filter(function (o) { return o.s.key === s.key; })[0];
+    const pk = dg && dg.data && dg.data.dagen && dg.data.dagen[1] && dg.data.dagen[1].piek;
+    if (pk) {
+      det += '<div class="detail-regel">warmste moment morgen <span class="w">' + pk.uur +
+             "u</span> \u00B7 modellen tussen " + pk.lo + " en " + pk.hi +
+             "u \u00B7 uit de uurcurve van de vijf modelsystemen</div>";
+    }
     const alt = altBron(s);
     if (alt) {
       det += '<div class="detail-regel">afrekenbron <span class="w">' +
@@ -1511,6 +1584,25 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     }
   }
 
+  /* "warmst 15u" of "warmst 14 tot 17u" als de modellen het tijdstip oneens zijn.
+     Voor vandaag verleden tijd zodra het moment voorbij is. */
+  function piekTekst(s, d, isVandaag) {
+    if (!d || !d.piek) return "";
+    const p = d.piek;
+    // Bij onenigheid tussen de modellen een tilde, niet een bereik: een bereik
+    // zonder middelpunt laat de lezer ten onrechte het midden aflezen.
+    const breed = (p.hi - p.lo) >= 3;
+    const wanneer = (breed ? "~" : "") + p.uur + "u";
+    let voorbij = false;
+    if (isVandaag) {
+      const nuUur = parseInt(new Intl.DateTimeFormat("nl-BE", {
+        hour: "2-digit", hour12: false, timeZone: s.tz }).format(new Date()), 10);
+      voorbij = nuUur > p.uur;
+    }
+    return '<div class="dag-piek' + (voorbij ? " voorbij" : "") + '">' +
+           (voorbij ? "warmst was " : "warmst ") + wanneer + "</div>";
+  }
+
   function bouwKaart(s, uitkomst, foutTekst) {
     const pr = paramsVan(s);
     const vandaag = isoInTz(s.tz, 0);
@@ -1535,7 +1627,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         if (hp && hp.mae_nieuw !== null && hp.mae_nieuw !== undefined) {
           histHtml = (eigenH ? "misser \u00B1" : "misser &lt;\u00B1") + nl(hp.mae_nieuw) + "\u00B0";
         }
-        let bijregels = "";
+        let bijregels = piekTekst(s, d, i === 0 && d.datum === vandaag);
         if (d.nws !== undefined) {
           bijregels += '<div class="dag-wu">NWS ' + heel(d.nws) + "\u00B0" + (d.nws_gemengd ? " \u2713" : "") + "</div>";
         }
@@ -1888,19 +1980,19 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       WEERGAVE = kn.getAttribute("data-weergave");
       bewaar("weerbot-weergave", WEERGAVE);
       tekenBalk();
-      ververs();
+      teken();
       return;
     }
     if (kn.hasAttribute("data-modus")) SORT.modus = kn.getAttribute("data-modus");
     else SORT.horizon = parseInt(kn.getAttribute("data-horizon"), 10);
     bewaar("weerbot-sortering", SORT);
     tekenBalk();
-    ververs();
+    teken();
   });
 
   document.getElementById("filterInvoer").addEventListener("input", function (e) {
     filterTekst = e.target.value.trim().toLowerCase();
-    ververs();
+    teken();
   });
 
   /* ── Compacte lijstrij ── */
@@ -1911,8 +2003,9 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     if (dagen && dagen.length) {
       ["vd", "mo", "ov"].forEach(function (lbl, i) {
         const d = dagen[i];
+        const uur = (d && d.piek) ? "\u00B7" + d.piek.uur + "u" : "";
         temps += '<div class="rij-temp"' + (d ? ' style="color:' + tint(d.verwachting, s.eenheid) + '"' : "") + ">" +
-                 (d ? heel(d.verwachting) : "\u00B7") + "<small>" + lbl + "</small></div>";
+                 (d ? heel(d.verwachting) : "\u00B7") + "<small>" + lbl + uur + "</small></div>";
       });
     } else {
       temps = '<div class="rij-temp" style="color:#E06C5B">\u2014<small>offline</small></div>';
@@ -1960,6 +2053,32 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
   }
 
   /* ── Verversen ── */
+  /* Tekent de kaarten of lijst opnieuw uit wat al in het geheugen staat.
+     Sorteren, filteren en van weergave wisselen gaan hier langs, zonder netwerk. */
+  let LAATSTE = null;
+
+  function teken() {
+    if (!LAATSTE) return;
+    const items = LAATSTE.filter(function (o) {
+      return !filterTekst || o.s.naam.toLowerCase().indexOf(filterTekst) !== -1;
+    });
+    const compact = WEERGAVE === "lijst";
+    const bak = compact ? lijstEl : grid;
+    const bouw = compact ? bouwRij : bouwKaart;
+    grid.style.display = compact ? "none" : "grid";
+    lijstEl.style.display = compact ? "flex" : "none";
+    if (compact) grid.innerHTML = ""; else lijstEl.innerHTML = "";
+    bak.innerHTML = "";
+    sorteer(items.map(function (o) {
+      return { s: o.s, i: o.i, u: { status: o.data ? "fulfilled" : "rejected", value: o.data },
+               cache: null, data: o.data };
+    })).forEach(function (o) {
+      const bron = LAATSTE.filter(function (x) { return x.s.key === o.s.key; })[0];
+      bak.appendChild(bouw(o.s, bron.data, bron.fout || undefined));
+    });
+    tikKlokken();
+  }
+
   function ververs() {
     if (bezig) return;
     bezig = true;
@@ -1970,7 +2089,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     const cache = lees("weerbot-cache-v2");
     const cachePer = (cache && cache.per) || {};
 
-    bundelVoorspellingen(steden).then(function () {
+    Promise.all([bundelVoorspellingen(steden), bundelUren(steden)]).then(function () {
       return beperkt(steden.map(function (s) {
         return function () { return haalStad(s).then(function (u) { return haalNws(s, u); }); };
       }), 6);
@@ -1986,37 +2105,26 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         }
       });
 
-      const items = steden.map(function (s, i) {
-        return { s: s, u: uitkomsten[i], i: i, cache: cachePer[s.key] };
-      }).filter(function (o) {
-        return !filterTekst || o.s.naam.toLowerCase().indexOf(filterTekst) !== -1;
-      });
-
       const oudGetoond = [], zonderData = [];
-      const compact = WEERGAVE === "lijst";
-      const bak = compact ? lijstEl : grid;
-      const bouw = compact ? bouwRij : bouwKaart;
-      grid.style.display = compact ? "none" : "grid";
-      lijstEl.style.display = compact ? "flex" : "none";
-      if (compact) grid.innerHTML = ""; else lijstEl.innerHTML = "";
-      bak.innerHTML = "";
-
-      sorteer(items).forEach(function (o) {
-        const s = o.s, u = o.u;
+      LAATSTE = steden.map(function (s, i) {
+        const u = uitkomsten[i];
         if (u.status === "fulfilled") {
           gelukt++;
           nieuwCache.per[s.key] = u.value;
-          bak.appendChild(bouw(s, u.value));
-        } else if (o.cache) {
-          uitCache++;
-          nieuwCache.per[s.key] = o.cache;
-          oudGetoond.push(s.naam);
-          bak.appendChild(bouw(s, o.cache));
-        } else {
-          zonderData.push(s.naam);
-          bak.appendChild(bouw(s, null, String(u.reason && u.reason.message || "").slice(0, 40)));
+          return { s: s, i: i, data: u.value, fout: null };
         }
+        if (cachePer[s.key]) {
+          uitCache++;
+          nieuwCache.per[s.key] = cachePer[s.key];
+          oudGetoond.push(s.naam);
+          return { s: s, i: i, data: cachePer[s.key], fout: null };
+        }
+        zonderData.push(s.naam);
+        return { s: s, i: i, data: null,
+                 fout: String(u.reason && u.reason.message || "").slice(0, 40) };
       });
+      teken();
+
       steden.forEach(function (s, i) {
         const u = uitkomsten[i];
         if (u.status === "fulfilled" && !nieuwCache.per[s.key]) nieuwCache.per[s.key] = u.value;
@@ -2135,7 +2243,8 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     const lijst = eigenSteden().filter(function (s) { return s.key !== key; });
     bewaar("weerbot-eigen-steden", lijst);
     if (weg) log(1, weg.naam, "stad verwijderd");
-    ververs();
+    if (LAATSTE) LAATSTE = LAATSTE.filter(function (o) { return o.s.key !== key; });
+    teken();
   }
   grid.addEventListener("click", kaartKlik);
   lijstEl.addEventListener("click", kaartKlik);

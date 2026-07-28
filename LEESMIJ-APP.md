@@ -212,6 +212,20 @@ Blijft de chip na een herijking terugkomen, dan is er iets structurelers aan de 
 
 **6. CUSUM getest en afgewezen.** De voorgestelde CUSUM driftdetector is op 220 dagen echte data vergeleken met de bestaande z toets: de z toets vangt 86% van de haalbare herijkingswinst bij 29% vuren, de beste CUSUM haalde 65% bij 35% vuren. De z toets blijft dus, nu met cijfers onderbouwd.
 
+## Warmste moment van de dag
+
+Onder elke dagtemperatuur staat wanneer de piek wordt verwacht, in de lokale tijd van die stad: bijvoorbeeld *warmst 16u*. Is het moment vandaag al voorbij, dan staat er *warmst was 13u* in een gedempte kleur. In de lijstweergave staat het uur achter het daglabel, zoals *mo·14u*.
+
+Het tijdstip komt uit de uurlijkse temperatuurcurve van dezelfde vijf modelsystemen die de voorspelling voeden. Zijn de modellen het onderling eens over het tijdstip, dan staat er een gewoon uur. Lopen ze meer dan drie uur uiteen, dan verschijnt er een tilde: *warmst ~15u*. Dat gebeurt vooral bij een naderend front, wanneer het maximum net voor of net na de frontpassage kan vallen. Onder "model en controles" staat dan precies tussen welke uren de modellen zitten.
+
+Let op het onderscheid: de getoonde temperatuur komt uit het volledige ensemble van maximaal 194 leden, het tijdstip uit de vijf hoofdruns. Het tijdstip van een piek is veel minder gevoelig dan de hoogte ervan, dus dat is een verantwoorde vereenvoudiging, maar het is geen ensemblegemiddelde.
+
+## De app reageert nu direct
+
+Sorteren, filteren en wisselen tussen kaarten en lijst gaan niet meer langs het netwerk. De app tekent opnieuw uit wat al in het geheugen staat, wat ongeveer een halve seconde kost voor 51 steden in plaats van een complete ophaalronde. Verse gegevens worden alleen opgehaald bij het opstarten, wanneer je bovenin op *vernieuwen* tikt, en wanneer je de app opent nadat hij meer dan een half uur ongebruikt was.
+
+Dat loste meteen een tweede probleem op: eerder werd een sorteerklik tijdens het ophalen volledig genegeerd, waardoor de sorteerknop soms niets leek te doen.
+
 ## Waarom je geen 429 meer krijgt
 
 Bij 51 steden deed de app per stad losse aanroepen: 51 voor de voorspellingen en nog eens ruim honderd voor de dagelijkse controle. Open-Meteo beantwoordt dat met **HTTP 429, te veel verzoeken**, waarna een deel van de steden leeg bleef.
