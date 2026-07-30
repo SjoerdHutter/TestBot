@@ -1,52 +1,461 @@
-stad,icao,markt_eenheid,n_train,n_test,mae_ruw,mae_ref_lin,mae_ridge,mae_gbm,mae_pooled,label,gekozen_variant,p_waarde,crps_constant,crps_ngr,ngr_c,ngr_d
-New York,KLGA,°F,876,572,1.241,1.001,0.896,1.205,1.015,ML,ridge,0.0,0.659,0.654,0.9,0.4
-Chicago,KORD,°F,876,572,1.03,0.935,0.928,1.253,1.07,LINEAIR,ref_lin,0.548,0.681,0.673,0.85,0.65
-Miami,KMIA,°F,876,572,0.966,0.611,0.624,0.744,0.626,LINEAIR,ref_lin,0.352,0.449,0.445,0.5,0.5
-Los Angeles,KLAX,°F,878,573,1.787,1.072,0.97,1.048,1.0,ML,ridge,0.002,0.708,0.701,0.9,0.35
-San Francisco,KSFO,°F,878,573,1.21,1.089,1.155,1.157,1.177,LINEAIR,ref_lin,0.034,0.781,0.777,1.2,0.3
-Seattle,KSEA,°F,878,573,1.011,0.811,0.786,0.857,0.809,LINEAIR,ref_lin,0.114,0.607,0.59,0.55,0.65
-Denver,KBKF,°F,870,566,1.324,1.069,1.044,1.325,1.069,LINEAIR,ref_lin,0.201,0.805,0.764,0.6,0.9
-Dallas,KDAL,°F,876,572,1.209,1.027,0.98,1.254,0.976,ML,ridge,0.048,0.709,0.707,1.05,0.4
-Houston,KHOU,°F,876,572,0.98,0.924,0.857,1.193,0.844,ML,ridge,0.0,0.627,0.622,0.8,0.5
-Austin,KAUS,°F,876,572,1.153,0.995,0.972,1.343,0.959,LINEAIR,ref_lin,0.341,0.746,0.721,0.65,0.85
-Atlanta,KATL,°F,876,572,1.494,0.966,0.907,1.167,0.944,ML,ridge,0.002,0.657,0.648,0.8,0.7
-Londen,EGLC,°C,876,572,0.808,0.757,0.72,0.954,0.739,ML,ridge,0.002,0.523,0.518,0.65,0.75
-Parijs,LFPB,°C,876,572,0.797,0.733,0.718,0.936,0.71,LINEAIR,ref_lin,0.253,0.532,0.526,0.65,0.6
-Amsterdam,EHAM,°C,876,572,0.843,0.689,0.675,0.857,0.674,LINEAIR,ref_lin,0.119,0.499,0.492,0.6,0.6
-Madrid,LEMD,°C,876,572,0.856,0.744,0.755,0.865,0.797,LINEAIR,ref_lin,0.218,0.544,0.532,0.5,0.9
-Milaan,LIMC,°C,876,572,1.151,0.881,0.832,0.918,0.796,ML,ridge,0.0,0.598,0.597,0.9,0.4
-München,EDDM,°C,876,572,1.127,0.88,0.806,0.969,0.816,ML,ridge,0.001,0.586,0.581,0.8,0.5
-Warschau,EPWA,°C,876,572,0.929,0.809,0.733,0.991,0.761,ML,ridge,0.0,0.522,0.516,0.7,0.6
-Helsinki,EFHK,°C,876,572,0.96,0.809,0.767,0.983,0.89,ML,ridge,0.022,0.55,0.546,0.75,0.7
-Ankara,LTAC,°C,876,572,0.93,0.716,0.709,0.956,0.72,LINEAIR,ref_lin,0.467,0.522,0.518,0.7,0.6
-Tokio,RJTT,°C,876,572,0.875,0.882,0.864,0.955,0.906,LINEAIR,ref_lin,0.129,0.625,0.622,0.9,0.6
-Seoul,RKSI,°C,876,572,1.724,0.974,0.807,1.032,0.923,ML,ridge,0.0,0.589,0.582,0.7,0.45
-Busan,RKPK,°C,876,572,0.815,0.814,0.803,0.998,0.843,LINEAIR,ref_lin,0.288,0.588,0.582,0.75,0.6
-Taipei,RCSS,°C,736,432,2.016,1.115,1.118,1.193,1.154,LINEAIR,ref_lin,0.854,0.799,0.798,1.2,0.4
-Peking,ZBAA,°C,876,572,1.242,0.985,0.887,1.045,0.896,ML,ridge,0.0,0.65,0.645,0.85,0.55
-Shanghai,ZSPD,°C,876,572,1.428,0.89,0.826,0.933,0.895,ML,ridge,0.0,0.602,0.594,0.75,0.75
-Guangzhou,ZGGG,°C,876,572,1.517,1.073,1.03,1.108,1.039,ML,ridge,0.042,0.739,0.735,1.0,0.65
-Shenzhen,ZGSZ,°C,876,572,0.872,0.855,0.843,0.957,0.846,LINEAIR,ref_lin,0.352,0.6,0.6,1.1,0.0
-Chengdu,ZUUU,°C,876,572,1.434,1.184,1.121,1.196,1.135,ML,ridge,0.001,0.792,0.787,1.2,0.6
-Chongqing,ZUCK,°C,876,572,1.444,1.05,0.972,1.078,1.007,ML,ridge,0.0,0.688,0.687,1.05,0.4
-Wuhan,ZHHH,°C,876,572,1.107,0.978,0.878,1.086,0.897,ML,ridge,0.0,0.626,0.623,0.9,0.6
-Qingdao,ZSQD,°C,876,572,0.839,0.849,0.812,1.016,0.824,ML,ridge,0.018,0.605,0.594,0.65,0.75
-Jinan,ZSJN,°C,878,574,0.71,0.677,0.624,0.752,0.711,ML,ridge,0.0,0.451,0.446,0.55,0.45
-Zhengzhou,ZHCC,°C,876,572,1.083,1.048,0.916,1.072,0.939,ML,ridge,0.0,0.644,0.643,1.0,0.45
-Manila,RPLL,°C,876,572,1.46,0.823,0.848,0.877,0.827,LINEAIR,ref_lin,0.05,0.587,0.586,0.95,0.4
-Kuala Lumpur,WMKK,°C,876,572,1.295,0.991,0.903,0.982,0.969,ML,ridge,0.0,0.649,0.648,1.05,0.3
-Singapore,WSSS,°C,876,572,1.115,0.727,0.7,0.783,0.707,LINEAIR,ref_lin,0.004,0.517,0.515,0.75,0.55
-Karachi,OPKC,°C,874,570,0.958,0.76,0.784,0.871,0.83,LINEAIR,ref_lin,0.048,0.551,0.543,0.6,0.55
-Lucknow,VILK,°C,820,549,1.244,1.031,0.927,1.072,0.959,ML,ridge,0.001,0.671,0.659,0.7,0.45
-Jeddah,OEJN,°C,876,572,1.497,1.017,0.924,1.092,1.128,ML,ridge,0.0,0.658,0.654,0.9,0.35
-Toronto,CYYZ,°C,876,572,1.027,0.898,0.877,1.199,1.066,LINEAIR,ref_lin,0.039,0.656,0.645,0.75,0.7
-Mexico-Stad,MMMX,°C,876,572,0.751,0.745,0.716,0.811,0.744,LINEAIR,ref_lin,0.017,0.533,0.531,0.7,0.55
-Panama-Stad,MPMG,°C,869,566,1.256,0.76,0.773,0.855,0.769,LINEAIR,ref_lin,0.236,0.549,0.549,0.95,0.0
-Buenos Aires,SAEZ,°C,876,572,1.178,0.973,0.967,1.116,0.98,LINEAIR,ref_lin,0.691,0.717,0.709,0.9,0.55
-São Paulo,SBGR,°C,876,572,1.136,1.031,0.982,1.098,0.975,ML,ridge,0.014,0.714,0.703,0.85,0.7
-Kaapstad,FACT,°C,852,548,1.132,0.832,0.825,0.918,0.89,LINEAIR,ref_lin,0.668,0.614,0.605,0.75,0.35
-Wellington,NZWN,°C,878,574,1.157,0.754,0.743,0.779,0.794,LINEAIR,ref_lin,0.294,0.557,0.534,0.4,1.0
-Istanbul,LTFM,°C,876,572,0.836,0.847,0.83,0.976,0.808,GEPOOLD,pooled,0.008,0.593,0.579,0.65,1.0
-Moskou,UUWW,°C,876,572,0.908,0.849,0.788,1.035,0.926,ML,ridge,0.0,0.568,0.562,0.75,0.6
-Tel Aviv,LLBG,°C,876,572,0.85,0.744,0.636,0.801,0.716,ML,ridge,0.0,0.455,0.452,0.6,0.6
-Hongkong,HKO,°C,878,546,1.643,0.87,0.868,0.933,0.881,LINEAIR,ref_lin,0.892,0.622,0.619,0.9,0.8
+[
+ {
+  "key": "nyc",
+  "naam": "New York",
+  "icao": "KLGA",
+  "station": "LaGuardia Airport",
+  "lat": 40.7772,
+  "lon": -73.8726,
+  "eenheid": "F"
+ },
+ {
+  "key": "chicago",
+  "naam": "Chicago",
+  "icao": "KORD",
+  "station": "Chicago O'Hare International Airport",
+  "lat": 41.9786,
+  "lon": -87.9048,
+  "eenheid": "F"
+ },
+ {
+  "key": "miami",
+  "naam": "Miami",
+  "icao": "KMIA",
+  "station": "Miami International Airport",
+  "lat": 25.796,
+  "lon": -80.2898,
+  "eenheid": "F"
+ },
+ {
+  "key": "losangeles",
+  "naam": "Los Angeles",
+  "icao": "KLAX",
+  "station": "Los Angeles International Airport",
+  "lat": 33.9425,
+  "lon": -118.408,
+  "eenheid": "F"
+ },
+ {
+  "key": "sanfrancisco",
+  "naam": "San Francisco",
+  "icao": "KSFO",
+  "station": "San Francisco International Airport",
+  "lat": 37.6198,
+  "lon": -122.3748,
+  "eenheid": "F"
+ },
+ {
+  "key": "seattle",
+  "naam": "Seattle",
+  "icao": "KSEA",
+  "station": "Seattle–Tacoma International Airport",
+  "lat": 47.4479,
+  "lon": -122.3103,
+  "eenheid": "F"
+ },
+ {
+  "key": "denver",
+  "naam": "Denver",
+  "icao": "KBKF",
+  "station": "Buckley Space Force Base",
+  "lat": 39.7017,
+  "lon": -104.752,
+  "eenheid": "F"
+ },
+ {
+  "key": "dallas",
+  "naam": "Dallas",
+  "icao": "KDAL",
+  "station": "Dallas Love Field",
+  "lat": 32.8448,
+  "lon": -96.8477,
+  "eenheid": "F"
+ },
+ {
+  "key": "houston",
+  "naam": "Houston",
+  "icao": "KHOU",
+  "station": "William P. Hobby Airport",
+  "lat": 29.6453,
+  "lon": -95.2768,
+  "eenheid": "F"
+ },
+ {
+  "key": "austin",
+  "naam": "Austin",
+  "icao": "KAUS",
+  "station": "Austin Bergstrom International Airport",
+  "lat": 30.1975,
+  "lon": -97.662,
+  "eenheid": "F"
+ },
+ {
+  "key": "atlanta",
+  "naam": "Atlanta",
+  "icao": "KATL",
+  "station": "Hartsfield Jackson Atlanta International Airport",
+  "lat": 33.6367,
+  "lon": -84.4281,
+  "eenheid": "F"
+ },
+ {
+  "key": "londen",
+  "naam": "Londen",
+  "icao": "EGLC",
+  "station": "London City Airport",
+  "lat": 51.5053,
+  "lon": 0.0553,
+  "eenheid": "C"
+ },
+ {
+  "key": "parijs",
+  "naam": "Parijs",
+  "icao": "LFPB",
+  "station": "Paris-Le Bourget International Airport",
+  "lat": 48.9623,
+  "lon": 2.4365,
+  "eenheid": "C"
+ },
+ {
+  "key": "amsterdam",
+  "naam": "Amsterdam",
+  "icao": "EHAM",
+  "station": "Amsterdam Airport Schiphol",
+  "lat": 52.3086,
+  "lon": 4.7639,
+  "eenheid": "C"
+ },
+ {
+  "key": "madrid",
+  "naam": "Madrid",
+  "icao": "LEMD",
+  "station": "Adolfo Suárez Madrid–Barajas Airport",
+  "lat": 40.4934,
+  "lon": -3.5722,
+  "eenheid": "C"
+ },
+ {
+  "key": "milaan",
+  "naam": "Milaan",
+  "icao": "LIMC",
+  "station": "Milan Malpensa International Airport",
+  "lat": 45.6306,
+  "lon": 8.7281,
+  "eenheid": "C"
+ },
+ {
+  "key": "munchen",
+  "naam": "München",
+  "icao": "EDDM",
+  "station": "Munich Airport",
+  "lat": 48.3538,
+  "lon": 11.7861,
+  "eenheid": "C"
+ },
+ {
+  "key": "warschau",
+  "naam": "Warschau",
+  "icao": "EPWA",
+  "station": "Warsaw Chopin Airport",
+  "lat": 52.1657,
+  "lon": 20.9671,
+  "eenheid": "C"
+ },
+ {
+  "key": "helsinki",
+  "naam": "Helsinki",
+  "icao": "EFHK",
+  "station": "Helsinki Vantaa Airport",
+  "lat": 60.3184,
+  "lon": 24.9633,
+  "eenheid": "C"
+ },
+ {
+  "key": "ankara",
+  "naam": "Ankara",
+  "icao": "LTAC",
+  "station": "Esenboğa International Airport",
+  "lat": 40.1281,
+  "lon": 32.9951,
+  "eenheid": "C"
+ },
+ {
+  "key": "tokio",
+  "naam": "Tokio",
+  "icao": "RJTT",
+  "station": "Tokyo Haneda International Airport",
+  "lat": 35.5497,
+  "lon": 139.787,
+  "eenheid": "C"
+ },
+ {
+  "key": "seoul",
+  "naam": "Seoul",
+  "icao": "RKSI",
+  "station": "Incheon International Airport",
+  "lat": 37.4691,
+  "lon": 126.451,
+  "eenheid": "C"
+ },
+ {
+  "key": "busan",
+  "naam": "Busan",
+  "icao": "RKPK",
+  "station": "Gimhae International Airport",
+  "lat": 35.1795,
+  "lon": 128.938,
+  "eenheid": "C"
+ },
+ {
+  "key": "taipei",
+  "naam": "Taipei",
+  "icao": "RCSS",
+  "station": "Taipei Songshan International Airport",
+  "lat": 25.0672,
+  "lon": 121.5528,
+  "eenheid": "C"
+ },
+ {
+  "key": "peking",
+  "naam": "Peking",
+  "icao": "ZBAA",
+  "station": "Beijing Capital International Airport",
+  "lat": 40.0773,
+  "lon": 116.5967,
+  "eenheid": "C"
+ },
+ {
+  "key": "shanghai",
+  "naam": "Shanghai",
+  "icao": "ZSPD",
+  "station": "Shanghai Pudong International Airport",
+  "lat": 31.1434,
+  "lon": 121.805,
+  "eenheid": "C"
+ },
+ {
+  "key": "guangzhou",
+  "naam": "Guangzhou",
+  "icao": "ZGGG",
+  "station": "Guangzhou Baiyun International Airport",
+  "lat": 23.3924,
+  "lon": 113.299,
+  "eenheid": "C"
+ },
+ {
+  "key": "shenzhen",
+  "naam": "Shenzhen",
+  "icao": "ZGSZ",
+  "station": "Shenzhen Bao'an International Airport",
+  "lat": 22.6395,
+  "lon": 113.8033,
+  "eenheid": "C"
+ },
+ {
+  "key": "chengdu",
+  "naam": "Chengdu",
+  "icao": "ZUUU",
+  "station": "Chengdu Shuangliu International Airport",
+  "lat": 30.5583,
+  "lon": 103.946,
+  "eenheid": "C"
+ },
+ {
+  "key": "chongqing",
+  "naam": "Chongqing",
+  "icao": "ZUCK",
+  "station": "Chongqing Jiangbei International Airport",
+  "lat": 29.7123,
+  "lon": 106.6519,
+  "eenheid": "C"
+ },
+ {
+  "key": "wuhan",
+  "naam": "Wuhan",
+  "icao": "ZHHH",
+  "station": "Wuhan Tianhe International Airport",
+  "lat": 30.7748,
+  "lon": 114.2137,
+  "eenheid": "C"
+ },
+ {
+  "key": "qingdao",
+  "naam": "Qingdao",
+  "icao": "ZSQD",
+  "station": "Qingdao Jiaodong International Airport",
+  "lat": 36.362,
+  "lon": 120.0882,
+  "eenheid": "C"
+ },
+ {
+  "key": "jinan",
+  "naam": "Jinan",
+  "icao": "ZSJN",
+  "station": "Jinan Yaoqiang International Airport",
+  "lat": 36.8572,
+  "lon": 117.216,
+  "eenheid": "C"
+ },
+ {
+  "key": "zhengzhou",
+  "naam": "Zhengzhou",
+  "icao": "ZHCC",
+  "station": "Zhengzhou Xinzheng International Airport",
+  "lat": 34.5265,
+  "lon": 113.8492,
+  "eenheid": "C"
+ },
+ {
+  "key": "manila",
+  "naam": "Manila",
+  "icao": "RPLL",
+  "station": "Ninoy Aquino International Airport",
+  "lat": 14.5086,
+  "lon": 121.02,
+  "eenheid": "C"
+ },
+ {
+  "key": "kualalumpur",
+  "naam": "Kuala Lumpur",
+  "icao": "WMKK",
+  "station": "Kuala Lumpur International Airport",
+  "lat": 2.7456,
+  "lon": 101.71,
+  "eenheid": "C"
+ },
+ {
+  "key": "singapore",
+  "naam": "Singapore",
+  "icao": "WSSS",
+  "station": "Singapore Changi Airport",
+  "lat": 1.3502,
+  "lon": 103.994,
+  "eenheid": "C"
+ },
+ {
+  "key": "karachi",
+  "naam": "Karachi",
+  "icao": "OPKC",
+  "station": "Jinnah International Airport",
+  "lat": 24.9065,
+  "lon": 67.1608,
+  "eenheid": "C"
+ },
+ {
+  "key": "lucknow",
+  "naam": "Lucknow",
+  "icao": "VILK",
+  "station": "Chaudhary Charan Singh International Airport",
+  "lat": 26.7606,
+  "lon": 80.8893,
+  "eenheid": "C"
+ },
+ {
+  "key": "jeddah",
+  "naam": "Jeddah",
+  "icao": "OEJN",
+  "station": "King Abdulaziz International Airport",
+  "lat": 21.6802,
+  "lon": 39.1574,
+  "eenheid": "C"
+ },
+ {
+  "key": "toronto",
+  "naam": "Toronto",
+  "icao": "CYYZ",
+  "station": "Toronto Pearson International Airport",
+  "lat": 43.6759,
+  "lon": -79.6294,
+  "eenheid": "C"
+ },
+ {
+  "key": "mexicostad",
+  "naam": "Mexico-Stad",
+  "icao": "MMMX",
+  "station": "Mexico City Benito Juárez International Airport",
+  "lat": 19.4358,
+  "lon": -99.0703,
+  "eenheid": "C"
+ },
+ {
+  "key": "panamastad",
+  "naam": "Panama-Stad",
+  "icao": "MPMG",
+  "station": "Marcos A. Gelabert International Airport",
+  "lat": 8.9733,
+  "lon": -79.5556,
+  "eenheid": "C"
+ },
+ {
+  "key": "buenosaires",
+  "naam": "Buenos Aires",
+  "icao": "SAEZ",
+  "station": "Ezeiza International Airport - Ministro Pistarini",
+  "lat": -34.8222,
+  "lon": -58.5358,
+  "eenheid": "C"
+ },
+ {
+  "key": "saopaulo",
+  "naam": "São Paulo",
+  "icao": "SBGR",
+  "station": "São Paulo/Guarulhos–Governor André Franco Montoro International Airport",
+  "lat": -23.4313,
+  "lon": -46.47,
+  "eenheid": "C"
+ },
+ {
+  "key": "kaapstad",
+  "naam": "Kaapstad",
+  "icao": "FACT",
+  "station": "Cape Town International Airport",
+  "lat": -33.974,
+  "lon": 18.6043,
+  "eenheid": "C"
+ },
+ {
+  "key": "wellington",
+  "naam": "Wellington",
+  "icao": "NZWN",
+  "station": "Wellington International Airport",
+  "lat": -41.3268,
+  "lon": 174.8069,
+  "eenheid": "C"
+ },
+ {
+  "key": "istanbul",
+  "naam": "Istanbul",
+  "icao": "LTFM",
+  "station": "İstanbul Airport",
+  "lat": 41.2749,
+  "lon": 28.7321,
+  "eenheid": "C"
+ },
+ {
+  "key": "moskou",
+  "naam": "Moskou",
+  "icao": "UUWW",
+  "station": "Vnukovo International Airport",
+  "lat": 55.5915,
+  "lon": 37.2615,
+  "eenheid": "C"
+ },
+ {
+  "key": "telaviv",
+  "naam": "Tel Aviv",
+  "icao": "LLBG",
+  "station": "Ben Gurion International Airport",
+  "lat": 32.0114,
+  "lon": 34.8867,
+  "eenheid": "C"
+ },
+ {
+  "key": "hongkong",
+  "naam": "Hongkong",
+  "icao": "HKO",
+  "station": "Hong Kong Observatory (hoofdstation)",
+  "lat": 22.302,
+  "lon": 114.1741,
+  "eenheid": "C"
+ }
+]

@@ -1,239 +1,312 @@
 #!/usr/bin/env python3
 """
-Deel 2 · extra voorspellers en stationswaarnemingen, 2021 t/m gisteren.
+Deel 3 · per stad trainen en backtesten tegen de stationswaarnemingen.
 
-  fetch : haalt op (hervatbaar via dezelfde cache):
-          a) 5 extra dagvoorspellers per stad (Open-Meteo historical, best_match):
-             relatieve vochtigheid (gem), bewolking (gem), windmax, instralingssom,
-             neerslagsom
-          b) uurlijkse METAR-temperaturen van de 50 meetstations via IEM
-          c) HKO-daghoogsten voor Hongkong
-  build : voegt alles samen met de p1/p2-reeksen uit deel 1 tot een
-          featurebestand per stad in uit_features/ (alles in graden Celsius)
+  train   : walk-forward (maandelijks bijtrainen), testmaanden 2025-01 t/m 2026-07,
+            hervatbaar per maand (klaar.json + voorspellingen.csv)
+  rapport : metriek per stad, ML-beslisregel, NGR-spreidingsfit, eindmodellen
+            hertrainen op alle data en exporteren naar modellen/
 
-python3 deel2_features.py fetch | build
+Varianten (alles in °C):
+  ruw      multi-model-gemiddelde zonder correctie
+  ref_lin  huidige stijl: a + b·mm + g·lagfout (per stad, OLS)
+  ridge    lineair met alle voorspellers (per stad, gestandaardiseerd, alpha 1,0)
+  gbm      HistGradientBoosting per stad
+  pooled   HistGradientBoosting over alle steden samen (+ lat/lon + stad-categorie)
+
+Beslisregel per stad:
+  backtestbaar  = n_test ≥ 120 én n_train(eind) ≥ 250
+  ML            = beste van (ridge, gbm) verslaat ref_lin met ≥ 0,03 °C én ≥ 2%
+                  én gepaarde toets p < 0,05
+  anders GEPOOLD als pooled ref_lin met dezelfde marge verslaat, anders LINEAIR
+  niet-backtestbaar → GEPOOLD (vraag 2.2)
 """
-import csv, io, json, math, sys, time, urllib.request, urllib.error
-from datetime import date, datetime, timedelta, timezone
+import csv, json, math, pickle, sys
 from pathlib import Path
-from zoneinfo import ZoneInfo
+import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.ensemble import HistGradientBoostingRegressor
 
-from backfill_openmeteo import (CACHE, HIER, STEDEN, EIND_DATUM, PAUZE,
-                                groepen, coord, jaarvensters,
-                                _index_lees, _index_schrijf)
+HIER   = Path(__file__).parent
+UITF   = HIER / "uit_features"
+STEDEN = json.load(open(HIER / "steden.json"))
+MODDIR = HIER / "modellen"
+VOORSP = HIER / "voorspellingen.csv"
+KLAAR  = HIER / "klaar.json"
 
-TZ  = json.load(open(HIER / "tijdzones.json"))
-UITF = HIER / "uit_features"
-AUX = ["relative_humidity_2m_mean", "cloud_cover_mean", "wind_speed_10m_max",
-       "shortwave_radiation_sum", "precipitation_sum"]
-AUX_KORT = ["rh_gem", "bewolking_gem", "wind_max", "instraling_som", "neerslag_som"]
+AUX = ["rh_gem", "bewolking_gem", "wind_max", "instraling_som", "neerslag_som"]
+P1  = ["p1_ifs", "p1_aifs", "p1_gfs", "p1_icon", "p1_gem"]
+MAANDEN = [f"{j}-{m:02d}" for j in (2025, 2026) for m in range(1, 13)][:19]
 
-def iem_id(s):
-    ic = s["icao"]
-    return ic[1:] if ic.startswith("K") and len(ic) == 4 else ic
+# ── laden ────────────────────────────────────────────────────────────────────
 
-def _haal_tekst(url, pogingen=5, timeout=150):
-    for p in range(pogingen):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "weerbot-backfill/1.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read().decode(errors="replace")
-        except urllib.error.HTTPError as e:
-            if e.code in (429, 503):
-                print(f"      HTTP {e.code}, wachten...", flush=True)
-                time.sleep(12 * (p + 1)); continue
-            raise
-        except Exception:
-            if p == pogingen - 1:
-                raise
-            time.sleep(8 * (p + 1))
-    raise RuntimeError("opgegeven")
+def laad_stad(key):
+    rijen = list(csv.DictReader(open(UITF / f"{key}.csv")))
+    n = len(rijen)
+    kol = {}
+    for k in ["mm_gem", "mm_spreiding", "run2run", "doy_sin", "doy_cos", "doel"] + P1 + AUX:
+        kol[k] = np.array([float(r[k]) if r[k] else np.nan for r in rijen])
+    datums = [r["datum"] for r in rijen]
+    lag = np.zeros(n)
+    fout = kol["doel"] - kol["mm_gem"]
+    for i in range(n):
+        for d in (2, 3):
+            if i - d >= 0 and np.isfinite(fout[i - d]):
+                lag[i] = fout[i - d]; break
+    kol["lag2_err"] = lag
+    return datums, kol
 
-def gecachet_tekst(url, label, meta):
-    import hashlib
-    CACHE.mkdir(exist_ok=True)
-    naam = hashlib.sha1(url.encode()).hexdigest()[:20] + ".txt"
-    pad  = CACHE / naam
-    idx  = _index_lees()
-    if pad.exists() and naam in idx:
-        return
-    print(f"    {label}", flush=True)
-    try:
-        t = _haal_tekst(url)
-    except Exception as e:
-        print(f"      OVERGESLAGEN ({e})", flush=True)
-        time.sleep(PAUZE); return
-    pad.write_text(t)
-    idx[naam] = meta; _index_schrijf(idx)
-    time.sleep(PAUZE)
+def matrix(kol, idx, feats, med=None):
+    X = []
+    for k in feats:
+        v = kol[k][idx].copy()
+        if k in P1:
+            v = np.where(np.isfinite(v), v, kol["mm_gem"][idx])
+        if k == "run2run":
+            v = np.where(np.isfinite(v), v, 0.0)
+        X.append(v)
+    X = np.column_stack(X)
+    if med is None:
+        med = np.nanmedian(X, axis=0)
+        med = np.where(np.isfinite(med), med, 0.0)
+    X = np.where(np.isfinite(X), X, med)
+    return X, med
 
-def fetch():
-    print("B  IEM METAR-uurtemperaturen (10 stations per aanroep)")
-    stations = [s for s in STEDEN if s["key"] not in ("hongkong",)]
-    for c in range(0, len(stations), 10):
-        blok = stations[c:c + 10]
-        st_q = "&".join("station=" + iem_id(s) for s in blok)
-        for j, b, e in jaarvensters(2021):
-            e_d = date.fromisoformat(e)
-            url = ("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?" + st_q +
-                   f"&data=tmpf&year1={j}&month1=1&day1=1"
-                   f"&year2={e_d.year}&month2={e_d.month}&day2={e_d.day}"
-                   "&tz=Etc%2FUTC&format=comma&latlon=no&missing=M&trace=T"
-                   "&direct=no&report_type=3")
-            gecachet_tekst(url, f"iem   blok {c//10+1}  {j}",
-                           {"bron": "iem", "stations": [iem_id(s) for s in blok]})
+def ols(X, y):
+    A = np.column_stack([np.ones(len(y)), X])
+    b, *_ = np.linalg.lstsq(A, y, rcond=None)
+    return b
 
-    print("C  HKO daghoogsten Hongkong")
-    for j in range(2021, date.fromisoformat(EIND_DATUM).year + 1):
-        url = ("https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
-               f"?dataType=CLMMAXT&rformat=json&station=HKO&year={j}")
-        gecachet_tekst(url, f"hko   {j}", {"bron": "hko", "jaar": j})
-    print("A  extra dagvoorspellers (historical-forecast, best_match)")
-    for g, groep in groepen():
-        sleutels = [s["key"] for s in groep]
-        # ERA5-archief: dezelfde vijf dagvariabelen, een bron voor alle steden.
-        # Wordt na de best_match-aanroepen ingelezen en overschrijft die, zodat
-        # elke stad exact dezelfde bron gebruikt (belangrijk voor het gepoolde model).
-        url = ("https://archive-api.open-meteo.com/v1/archive" + coord(groep) +
-               f"&daily={','.join(AUX)}&start_date=2021-01-01&end_date={EIND_DATUM}&timezone=auto")
-        gecachet_tekst(url, f"aux   groep {g+1}  archief 2021 t/m nu",
-                       {"bron": "aux", "steden": sleutels})
+# ── train (walk-forward, hervatbaar) ─────────────────────────────────────────
 
-    print("Klaar met ophalen.")
+def train():
+    data = {s["key"]: laad_stad(s["key"]) for s in STEDEN}
+    # aux meenemen als hij in het multi-modeltijdperk voldoende gevuld is
+    vul = []
+    for key, (datums, kol) in data.items():
+        m = np.array([d >= "2024-04-01" for d in datums])
+        vul.append(np.mean([np.mean(np.isfinite(kol[a][m])) for a in AUX]))
+    aux_actief = float(np.mean(vul)) >= 0.30
+    feats = P1 + ["mm_spreiding", "run2run", "doy_sin", "doy_cos", "lag2_err"] + (AUX if aux_actief else [])
+    print(f"features ({len(feats)}): aux {'meegenomen' if aux_actief else 'weggelaten (te leeg)'}")
 
-# ── build ────────────────────────────────────────────────────────────────────
+    klaar = json.load(open(KLAAR)) if KLAAR.exists() else []
+    nieuw = not VOORSP.exists()
+    fu = open(VOORSP, "a", newline="")
+    w = csv.writer(fu)
+    if nieuw:
+        w.writerow(["maand", "stad", "datum", "doel", "ruw", "ref_lin", "ridge", "gbm", "pooled"])
 
-def f_naar_c(f): return (f - 32) * 5 / 9
-
-def build():
-    idx = _index_lees()
-    # 1. basis: p1/p2 en era5 uit deel 1
-    basis = {}          # key → datum → dict
-    for r in csv.DictReader(open(HIER / "uit" / "alle_steden.csv")):
-        naam2key = getattr(build, "_n2k", None)
-        if naam2key is None:
-            naam2key = {s["naam"]: s["key"] for s in STEDEN}; build._n2k = naam2key
-        basis.setdefault(naam2key[r["stad"]], {})[r["datum"]] = r
-
-    # 2. aux-voorspellers
-    aux = {s["key"]: {} for s in STEDEN}
-    for naam, meta in idx.items():
-        if meta.get("bron") != "aux":
+    extra = {s["key"]: (s["lat"], abs(s["lat"]), s["lon"], i) for i, s in enumerate(STEDEN)}
+    for maand in MAANDEN:
+        if maand in klaar:
             continue
-        lijst = json.loads((CACHE / naam).read_text())
-        lijst = lijst if isinstance(lijst, list) else [lijst]
-        for key, res in zip(meta["steden"], lijst):
-            d = res.get("daily", {})
-            for i, t in enumerate(d.get("time", [])):
-                rij = {}
-                for lang, kort in zip(AUX, AUX_KORT):
-                    v = d.get(lang, [None]*len(d["time"]))[i]
-                    if v is not None:
-                        rij[kort] = v
-                if rij:
-                    aux[key].setdefault(t, {}).update(rij)
+        grens = maand + "-01"
+        # gepoold trainen
+        Xp, yp = [], []
+        per_stad = {}
+        for key, (datums, kol) in data.items():
+            da = np.array(datums)
+            geldig = np.isfinite(kol["mm_gem"]) & np.isfinite(kol["doel"])
+            tr = np.where(geldig & (da < grens))[0]
+            te = np.where(geldig & np.char.startswith(da, maand))[0]
+            per_stad[key] = (tr, te)
+            if len(tr):
+                X, med = matrix(kol, tr, feats)
+                Xp.append(np.column_stack([X] + [np.full(len(tr), v) for v in extra[key]]))
+                yp.append(kol["doel"][tr])
+        pooled = None
+        if Xp:
+            Xp = np.vstack(Xp); yp = np.concatenate(yp)
+            if len(yp) >= 2000:
+                pooled = HistGradientBoostingRegressor(
+                    max_iter=150, learning_rate=0.07, max_leaf_nodes=31,
+                    min_samples_leaf=40, l2_regularization=1.0,
+                    categorical_features=[Xp.shape[1] - 1], random_state=1)
+                pooled.fit(Xp, yp)
 
-    # 3. IEM-stationswaarnemingen → daghoogste per lokale kalenderdag
-    per_station = {}    # iem-id → list[(utc_dt, tmpf)]
-    for naam, meta in idx.items():
-        if meta.get("bron") != "iem":
-            continue
-        for regel in (CACHE / naam).read_text().splitlines():
-            if regel.startswith("#") or regel.startswith("station,"):
+        n_rij = 0
+        for key, (datums, kol) in data.items():
+            tr, te = per_stad[key]
+            if not len(te):
                 continue
-            d = regel.split(",")
-            if len(d) < 3 or d[2] in ("M", ""):
-                continue
-            try:
-                per_station.setdefault(d[0], []).append(
-                    (datetime.strptime(d[1], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc),
-                     float(d[2])))
-            except ValueError:
-                continue
+            y_tr, y_te = kol["doel"][tr], kol["doel"][te]
+            mm_te = kol["mm_gem"][te]
+            uit = {"ruw": mm_te,
+                   "ref_lin": np.full(len(te), np.nan),
+                   "ridge":   np.full(len(te), np.nan),
+                   "gbm":     np.full(len(te), np.nan),
+                   "pooled":  np.full(len(te), np.nan)}
+            if len(tr) >= 60:
+                Xl_tr = np.column_stack([kol["mm_gem"][tr], kol["lag2_err"][tr]])
+                co = ols(Xl_tr, y_tr)
+                uit["ref_lin"] = co[0] + co[1] * mm_te + co[2] * kol["lag2_err"][te]
+                X_tr, med = matrix(kol, tr, feats)
+                X_te, _   = matrix(kol, te, feats, med)
+                mu, sd = X_tr.mean(0), X_tr.std(0); sd[sd == 0] = 1
+                ri = Ridge(alpha=1.0).fit((X_tr - mu) / sd, y_tr)
+                uit["ridge"] = ri.predict((X_te - mu) / sd)
+                if len(tr) >= 100:
+                    gb = HistGradientBoostingRegressor(
+                        max_iter=120, learning_rate=0.07, max_leaf_nodes=15,
+                        min_samples_leaf=20, l2_regularization=1.0, random_state=1)
+                    gb.fit(X_tr, y_tr)
+                    uit["gbm"] = gb.predict(X_te)
+                if pooled is not None:
+                    Xe = np.column_stack([X_te] + [np.full(len(te), v) for v in extra[key]])
+                    uit["pooled"] = pooled.predict(Xe)
+            naam = {s["key"]: s["naam"] for s in STEDEN}[key]
+            for i, ix in enumerate(te):
+                rond = lambda v: "" if not np.isfinite(v) else round(float(v), 2)
+                w.writerow([maand, naam, datums[ix], rond(y_te[i]), rond(uit["ruw"][i]),
+                            rond(uit["ref_lin"][i]), rond(uit["ridge"][i]),
+                            rond(uit["gbm"][i]), rond(uit["pooled"][i])])
+                n_rij += 1
+        fu.flush()
+        klaar.append(maand)
+        json.dump(klaar, open(KLAAR, "w"))
+        print(f"  {maand}: {n_rij} testdagen weggeschreven", flush=True)
+    fu.close()
+    print("train klaar:", len(klaar), "maanden")
 
-    station_max = {s["key"]: {} for s in STEDEN}
+# ── rapport en export ────────────────────────────────────────────────────────
+
+from scipy.special import erf as _erf
+
+def crps_gauss(e, s):
+    z = e / s
+    Phi = 0.5 * (1 + _erf(z / math.sqrt(2)))
+    phi = np.exp(-z * z / 2) / math.sqrt(2 * math.pi)
+    return np.mean(s * (z * (2 * Phi - 1) + 2 * phi - 1 / math.sqrt(math.pi)))
+
+def rapport():
+    rijen = list(csv.DictReader(open(VOORSP)))
+    per = {}
+    for r in rijen:
+        per.setdefault(r["stad"], []).append(r)
+    data = {s["key"]: laad_stad(s["key"]) for s in STEDEN}
+    naam2 = {s["naam"]: s for s in STEDEN}
+    MODDIR.mkdir(exist_ok=True)
+
+    feats = P1 + ["mm_spreiding", "run2run", "doy_sin", "doy_cos", "lag2_err"] + AUX
+    res, ml_export, lab_telling = [], {}, {}
     for s in STEDEN:
-        if s["key"] == "hongkong":
-            continue
-        tz = ZoneInfo(TZ[s["key"]])
-        per_dag = {}
-        for dt_utc, tf in per_station.get(iem_id(s), []):
-            lok = dt_utc.astimezone(tz)
-            per_dag.setdefault(lok.date().isoformat(), []).append((lok.hour, tf))
-        for dag, obs in per_dag.items():
-            # geldigheidseis: minstens 8 waarnemingen en minstens één tussen 10 en 18 u
-            if len(obs) >= 8 and any(10 <= u <= 18 for u, _ in obs):
-                station_max[s["key"]][dag] = round(f_naar_c(max(t for _, t in obs)), 1)
+        naam, key = s["naam"], s["key"]
+        rs = [r for r in per.get(naam, []) if r["doel"]]
+        def fouten(k):
+            return np.array([abs(float(r[k]) - float(r["doel"])) for r in rs if r[k]])
+        def paren(k):
+            return np.array([(abs(float(r["ref_lin"]) - float(r["doel"])),
+                              abs(float(r[k]) - float(r["doel"])))
+                             for r in rs if r[k] and r["ref_lin"]])
+        n_test = len([r for r in rs if r["ref_lin"]])
+        datums, kol = data[key]
+        geldig = np.isfinite(kol["mm_gem"]) & np.isfinite(kol["doel"])
+        n_train = int(np.sum(geldig & (np.array(datums) < "2026-07-01")))
+        mae = {k: (float(np.mean(fouten(k))) if len(fouten(k)) else np.nan)
+               for k in ("ruw", "ref_lin", "ridge", "gbm", "pooled")}
+        backtestbaar = n_test >= 120 and n_train >= 250
 
-    # 4. HKO
-    for naam, meta in idx.items():
-        if meta.get("bron") != "hko":
-            continue
-        d = json.loads((CACHE / naam).read_text())
-        for rij in d.get("data", []):
-            try:
-                j, m, dg, v = int(rij[0]), int(rij[1]), int(rij[2]), float(rij[3])
-                station_max["hongkong"][f"{j:04d}-{m:02d}-{dg:02d}"] = v
-            except (ValueError, IndexError):
-                continue
+        label, variant, p_w = "LINEAIR", "ref_lin", np.nan
+        if not backtestbaar:
+            label, variant = "GEPOOLD", "pooled"
+        else:
+            kand = min(("ridge", "gbm"), key=lambda k: mae[k] if np.isfinite(mae[k]) else 9e9)
+            def wint(k):
+                pr = paren(k)
+                if len(pr) < 60:
+                    return False, np.nan
+                d = pr[:, 0] - pr[:, 1]
+                t = d.mean() / (d.std(ddof=1) / math.sqrt(len(d)) + 1e-12)
+                p = math.erfc(abs(t) / math.sqrt(2))
+                marge = mae["ref_lin"] - mae[k]
+                return (marge >= 0.03 and marge >= 0.02 * mae["ref_lin"] and p < 0.05), p
+            ok, p_w = wint(kand)
+            if ok:
+                label, variant = "ML", kand
+            else:
+                ok_p, p_p = wint("pooled")
+                if ok_p:
+                    label, variant, p_w = "GEPOOLD", "pooled", p_p
+        lab_telling[label] = lab_telling.get(label, 0) + 1
 
-    # 5. samenvoegen en wegschrijven
-    UITF.mkdir(exist_ok=True)
-    P1 = ["p1_ecmwf_ifs025", "p1_ecmwf_aifs025", "p1_ecmwf_aifs025_single",
-          "p1_gfs_seamless", "p1_icon_seamless", "p1_gem_seamless"]
-    P2 = [k.replace("p1_", "p2_") for k in P1]
-    kop = (["datum", "p1_ifs", "p1_aifs", "p1_gfs", "p1_icon", "p1_gem",
-            "p2_ifs", "p2_aifs", "p2_gfs", "p2_icon", "p2_gem",
-            "mm_gem", "mm_spreiding", "run2run"] + AUX_KORT +
-           ["doy_sin", "doy_cos", "era5_max", "station_max", "doel", "doelbron"])
+        # NGR-spreiding op out-of-sample-fouten van de gekozen variant
+        e_sp = [(float(r[variant]) - float(r["doel"]),
+                 kol["mm_spreiding"][datums.index(r["datum"])])
+                for r in rs if r.get(variant)]
+        e_sp = [(e, sp) for e, sp in e_sp if np.isfinite(sp)]
+        c_b = d_b = crps_n = crps_c = np.nan
+        if len(e_sp) >= 100:
+            e = np.array([x[0] for x in e_sp]); sp = np.array([x[1] for x in e_sp])
+            s0 = float(e.std(ddof=1)); crps_c = float(crps_gauss(e, np.full(len(e), s0)))
+            best = (9e9, np.nan, np.nan)
+            for c in np.arange(0.05, 2.51, 0.05):
+                for dd in np.arange(0.0, 2.51, 0.05):
+                    v = crps_gauss(e, np.sqrt(c * c + (dd * sp) ** 2))
+                    if v < best[0]:
+                        best = (v, c, dd)
+            crps_n, c_b, d_b = float(best[0]), float(best[1]), float(best[2])
 
-    telling = []
+        # eindmodel op alle data hertrainen en exporteren
+        tr = np.where(geldig)[0]
+        y = kol["doel"][tr]
+        exp = {"stad": naam, "icao": s["icao"], "label": label, "variant": variant,
+               "eenheid_training": "°C", "ngr": {"c": c_b, "d": d_b}}
+        if variant == "ref_lin" or label == "LINEAIR":
+            co = ols(np.column_stack([kol["mm_gem"][tr], kol["lag2_err"][tr]]), y)
+            exp["ref_lin"] = {"a": round(float(co[0]), 4), "b": round(float(co[1]), 4),
+                              "g": round(float(co[2]), 4)}
+        if label == "ML":
+            X, med = matrix(kol, tr, feats)
+            if variant == "ridge":
+                mu, sd = X.mean(0), X.std(0); sd[sd == 0] = 1
+                ri = Ridge(alpha=1.0).fit((X - mu) / sd, y)
+                exp["ridge"] = {"features": feats, "mu": mu.round(4).tolist(),
+                                "sd": sd.round(4).tolist(), "med": med.round(4).tolist(),
+                                "coef": ri.coef_.round(5).tolist(),
+                                "intercept": round(float(ri.intercept_), 4)}
+            else:
+                gb = HistGradientBoostingRegressor(
+                    max_iter=120, learning_rate=0.07, max_leaf_nodes=15,
+                    min_samples_leaf=20, l2_regularization=1.0, random_state=1).fit(X, y)
+                pickle.dump({"model": gb, "features": feats, "med": med},
+                            open(MODDIR / f"gbm_{key}.pkl", "wb"))
+                exp["gbm_bestand"] = f"gbm_{key}.pkl"
+        ml_export[key] = exp
+        rd = lambda v: ("" if not np.isfinite(v) else round(v, 3))
+        res.append([naam, s["icao"], "°F" if s["eenheid"] == "F" else "°C",
+                    n_train, n_test, rd(mae["ruw"]), rd(mae["ref_lin"]), rd(mae["ridge"]),
+                    rd(mae["gbm"]), rd(mae["pooled"]),
+                    ("ML" if label == "ML" else label), variant, rd(p_w),
+                    rd(crps_c), rd(crps_n), rd(c_b), rd(d_b)])
+
+    # gepoold eindmodel op alle data
+    extra = {s["key"]: (s["lat"], abs(s["lat"]), s["lon"], i) for i, s in enumerate(STEDEN)}
+    Xp, yp = [], []
     for s in STEDEN:
-        key = s["key"]
-        with open(UITF / f"{key}.csv", "w", newline="") as f:
-            w = csv.writer(f); w.writerow(kop)
-            n_doel = 0
-            for dag in sorted(basis.get(key, {})):
-                b = basis[key][dag]
-                def g(k):
-                    v = b.get(k, "")
-                    return float(v) if v else None
-                p1 = {"ifs": g(P1[0]),
-                      "aifs": g(P1[2]) if g(P1[2]) is not None else g(P1[1]),
-                      "gfs": g(P1[3]), "icon": g(P1[4]), "gem": g(P1[5])}
-                p2 = {"ifs": g(P2[0]),
-                      "aifs": g(P2[2]) if g(P2[2]) is not None else g(P2[1]),
-                      "gfs": g(P2[3]), "icon": g(P2[4]), "gem": g(P2[5])}
-                p1v = [v for v in p1.values() if v is not None]
-                p2v = [v for v in p2.values() if v is not None]
-                mm = sp = r2r = None
-                if len(p1v) >= 4:
-                    mm = sum(p1v) / len(p1v)
-                    sp = (sum((x - mm) ** 2 for x in p1v) / (len(p1v) - 1)) ** 0.5
-                    if len(p2v) >= 4:
-                        r2r = mm - sum(p2v) / len(p2v)
-                a = aux[key].get(dag, {})
-                dt = date.fromisoformat(dag)
-                doy = dt.timetuple().tm_yday / 365.25 * 2 * math.pi
-                stm = station_max[key].get(dag)
-                if key == "jinan":
-                    doel, bron = g("era5_max"), "era5"
-                else:
-                    doel, bron = stm, ("station" if stm is not None else "")
-                if doel is not None:
-                    n_doel += 1
-                rond = lambda v, d=1: ("" if v is None else round(v, d))
-                w.writerow([dag] +
-                           [rond(p1[k]) for k in ("ifs","aifs","gfs","icon","gem")] +
-                           [rond(p2[k]) for k in ("ifs","aifs","gfs","icon","gem")] +
-                           [rond(mm, 2), rond(sp, 2), rond(r2r, 2)] +
-                           [a.get(k, "") for k in AUX_KORT] +
-                           [round(math.sin(doy), 4), round(math.cos(doy), 4),
-                            b.get("era5_max", ""), rond(stm), rond(doel), bron])
-        telling.append((key, n_doel))
-    dun = [t for t in telling if t[1] < 1500]
-    print(f"{len(telling)} featurebestanden → {UITF}/")
-    print("steden met < 1500 doeldagen:", dun if dun else "geen")
+        datums, kol = data[s["key"]]
+        tr = np.where(np.isfinite(kol["mm_gem"]) & np.isfinite(kol["doel"]))[0]
+        X, _ = matrix(kol, tr, feats)
+        Xp.append(np.column_stack([X] + [np.full(len(tr), v) for v in extra[s["key"]]]))
+        yp.append(kol["doel"][tr])
+    Xp = np.vstack(Xp); yp = np.concatenate(yp)
+    pooled = HistGradientBoostingRegressor(
+        max_iter=150, learning_rate=0.07, max_leaf_nodes=31, min_samples_leaf=40,
+        l2_regularization=1.0, categorical_features=[Xp.shape[1] - 1], random_state=1).fit(Xp, yp)
+    pickle.dump({"model": pooled, "features": feats + ["lat", "lat_abs", "lon", "stad_idx"],
+                 "stad_idx": {s["key"]: i for i, s in enumerate(STEDEN)}},
+                open(MODDIR / "pooled_gbm.pkl", "wb"))
+    json.dump(ml_export, open(MODDIR / "modellen.json", "w"), ensure_ascii=False, indent=1)
+
+    with open(HIER / "resultaten.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["stad", "icao", "markt_eenheid", "n_train", "n_test",
+                    "mae_ruw", "mae_ref_lin", "mae_ridge", "mae_gbm", "mae_pooled",
+                    "label", "gekozen_variant", "p_waarde",
+                    "crps_constant", "crps_ngr", "ngr_c", "ngr_d"])
+        w.writerows(res)
+    print("labels:", lab_telling)
+    print(f"resultaten.csv + modellen/ geschreven ({len(res)} steden)")
 
 if __name__ == "__main__":
-    (fetch if (sys.argv[1:] or ["fetch"])[0] == "fetch" else build)()
+    (train if (sys.argv[1:] or ["train"])[0] == "train" else rapport)()

@@ -1,113 +1,146 @@
 #!/usr/bin/env python3
 """
-Deel 6 · leercurve: hoe schaalt de fout met de hoeveelheid trainingsdata?
+Deel 7 · lange backfill 2000 t/m 2020 voor het perfect-prognosis deelmodel.
 
-Vaste testset: 1 jan t/m 28 jul 2026, alle 51 steden. Training telkens op de
-laatste N dagen vóór 2026 (N = 120, 240, 360, 480, alles ≈ 660). Per venster:
-  ridge   per stad (de huidige kampioen)
-  gbm     gepoold HistGradientBoosting
-  nn      gepoold MLP 64×32 met stads-one-hot
-Uitvoer: leercurve.csv. Hervatbaar: al berekende vensters worden overgeslagen.
-Daarna een 1/√n-extrapolatie als indicatie voor 25 jaar (n ≈ 9400 per station),
-met de kanttekening dat dit een bovengrens is (niet-stationariteit oude modellen).
+  fetch : a) ERA5 daghoogste + de vijf weersvariabelen per stad (archief)
+          b) IEM METAR-uurtemperaturen 2000 t/m 2020 (10 stations × 3 jaar per
+             aanroep), c) HKO-daghoogsten 2000 t/m 2020
+  build : streaming samenvoegen naar lang/<stad>.csv met per datum:
+          era5_max, de vijf weersvariabelen en station_max
+
+Hervatbaar via dezelfde cache. Kanttekeningen: stations die pas later
+bestonden (LTFM 2018, ZSQD = Liuting vóór 2021) leveren minder of gemengde
+historie; dat is een eigenschap van de werkelijkheid, niet van de code.
 """
-import csv, math, sys
-from datetime import date, timedelta
+import csv, json, sys, time
+from datetime import datetime, timezone
 from pathlib import Path
-import numpy as np
-from sklearn.linear_model import Ridge
-from sklearn.ensemble import HistGradientBoostingRegressor
-from sklearn.neural_network import MLPRegressor
+from zoneinfo import ZoneInfo
 
-from deel3_train import laad_stad, matrix, P1, AUX, STEDEN, HIER
+from backfill_openmeteo import CACHE, HIER, STEDEN, PAUZE, groepen, coord, _index_lees
+from deel2_features import gecachet_tekst, iem_id, AUX, AUX_KORT, f_naar_c
 
-FEATS   = P1 + ["mm_spreiding", "run2run", "doy_sin", "doy_cos", "lag2_err"] + AUX
-UIT     = HIER / "leercurve.csv"
-GRENS   = "2026-01-01"
-VENSTERS = [120, 240, 360, 480, 9999]
+TZ   = json.load(open(HIER / "tijdzones.json"))
+LANG = HIER / "lang"
+IEM_VENSTERS = [(j, min(j + 2, 2020)) for j in range(2000, 2021, 3)]
 
-def run():
-    data  = {s["key"]: laad_stad(s["key"]) for s in STEDEN}
-    extra = {s["key"]: (s["lat"], abs(s["lat"]), s["lon"]) for s in STEDEN}
-    idx_s = {s["key"]: i for i, s in enumerate(STEDEN)}
+def fetch():
+    print("B  HKO daghoogsten 2000 t/m 2020")
+    for j in range(2000, 2021):
+        url = ("https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
+               f"?dataType=CLMMAXT&rformat=json&station=HKO&year={j}")
+        gecachet_tekst(url, f"hkoL  {j}", {"bron": "hkoL", "jaar": j})
 
-    klaar = set()
-    if UIT.exists():
-        klaar = {int(r["venster_dagen"]) for r in csv.DictReader(open(UIT))}
-    else:
-        with open(UIT, "w", newline="") as f:
-            csv.writer(f).writerow(["venster_dagen", "n_train_totaal",
-                                    "mae_ridge", "mae_gbm", "mae_nn"])
+    print("C  IEM METAR-uurtemperaturen 2000 t/m 2020 (35 aanroepen)")
+    stations = [s for s in STEDEN if s["key"] != "hongkong"]
+    for c in range(0, len(stations), 10):
+        blok = stations[c:c + 10]
+        st_q = "&".join("station=" + iem_id(s) for s in blok)
+        for j1, j2 in IEM_VENSTERS:
+            url = ("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?" + st_q +
+                   f"&data=tmpf&year1={j1}&month1=1&day1=1&year2={j2}&month2=12&day2=31"
+                   "&tz=Etc%2FUTC&format=comma&latlon=no&missing=M&trace=T"
+                   "&direct=no&report_type=3")
+            gecachet_tekst(url, f"iemL  blok {c//10+1}  {j1} tot {j2}",
+                           {"bron": "iemL", "stations": [iem_id(s) for s in blok]})
+    print("A  ERA5 lang: daghoogste + vijf weersvariabelen, 2000 t/m 2020")
+    for g, groep in groepen():
+        sleutels = [s["key"] for s in groep]
+        for b, e in [("2000-01-01", "2010-12-31"), ("2011-01-01", "2020-12-31")]:
+            url = ("https://archive-api.open-meteo.com/v1/archive" + coord(groep) +
+                   f"&daily=temperature_2m_max,{','.join(AUX)}"
+                   f"&start_date={b}&end_date={e}&timezone=auto")
+            gecachet_tekst(url, f"era5L groep {g+1}  {b[:4]} tot {e[:4]}",
+                           {"bron": "era5L", "steden": sleutels})
 
-    for venster in VENSTERS:
-        if venster in klaar:
+    print("Klaar met ophalen.")
+
+# ── build (streaming, geheugenzuinig) ────────────────────────────────────────
+
+def build():
+    idx = _index_lees()
+    key_per_iem = {iem_id(s): s["key"] for s in STEDEN if s["key"] != "hongkong"}
+    tzcache = {k: ZoneInfo(TZ[k]) for k in key_per_iem.values()}
+
+    # station → datum → [n_obs, max_f, middag_gezien]
+    agg = {}
+    era = {s["key"]: {} for s in STEDEN}   # key → datum → dict
+    for naam, meta in sorted(idx.items()):
+        pad = CACHE / naam
+        if not pad.exists():
             continue
-        vanaf = (date.fromisoformat(GRENS) - timedelta(days=venster)).isoformat()
-        fouten = {"ridge": [], "gbm": [], "nn": []}
-        Xg, yg, Xn, yn, blokken = [], [], [], [], {}
-        for key, (datums, kol) in data.items():
-            da = np.array(datums)
-            geldig = np.isfinite(kol["mm_gem"]) & np.isfinite(kol["doel"])
-            tr = np.where(geldig & (da < GRENS) & (da >= vanaf))[0]
-            te = np.where(geldig & (da >= GRENS))[0]
-            if len(tr) < 60 or not len(te):
-                continue
-            X_tr, med = matrix(kol, tr, FEATS)
-            X_te, _   = matrix(kol, te, FEATS, med)
-            y_tr, y_te = kol["doel"][tr], kol["doel"][te]
-            mu, sd = X_tr.mean(0), X_tr.std(0); sd[sd == 0] = 1
-            ri = Ridge(alpha=1.0).fit((X_tr - mu) / sd, y_tr)
-            fouten["ridge"].extend(np.abs(ri.predict((X_te - mu) / sd) - y_te))
-            ex = [np.full(len(tr), v) for v in extra[key]]
-            Xg.append(np.column_stack([X_tr] + ex + [np.full(len(tr), idx_s[key])]))
-            one = np.zeros((len(tr), len(STEDEN))); one[:, idx_s[key]] = 1
-            Xn.append(np.column_stack([X_tr] + ex + [one]))
-            yg.append(y_tr); yn.append(y_tr)
-            blokken[key] = (te, med, X_te, y_te)
+        bron = meta.get("bron")
+        if bron == "iemL":
+            with open(pad) as f:
+                for regel in f:
+                    if regel.startswith(("#", "station,")):
+                        continue
+                    d = regel.rstrip("\n").split(",")
+                    if len(d) < 3 or d[2] in ("M", ""):
+                        continue
+                    key = key_per_iem.get(d[0])
+                    if not key:
+                        continue
+                    try:
+                        v = d[1]  # 'YYYY-MM-DD HH:MM' in UTC
+                        dt = datetime(int(v[0:4]), int(v[5:7]), int(v[8:10]),
+                                      int(v[11:13]), int(v[14:16]),
+                                      tzinfo=timezone.utc).astimezone(tzcache[key])
+                        tf = float(d[2])
+                    except (ValueError, IndexError):
+                        continue
+                    e = agg.setdefault(key, {}).setdefault(dt.date().isoformat(),
+                                                           [0, -999.0, False])
+                    e[0] += 1
+                    if tf > e[1]:
+                        e[1] = tf
+                    if 10 <= dt.hour <= 18:
+                        e[2] = True
+        elif bron == "era5L":
+            lijst = json.loads(pad.read_text())
+            lijst = lijst if isinstance(lijst, list) else [lijst]
+            for key, res in zip(meta["steden"], lijst):
+                dd = res.get("daily", {})
+                tijden = dd.get("time", [])
+                for i, t in enumerate(tijden):
+                    rij = era[key].setdefault(t, {})
+                    v = dd.get("temperature_2m_max", [None]*len(tijden))[i]
+                    if v is not None:
+                        rij["era5_max"] = v
+                    for lang_n, kort in zip(AUX, AUX_KORT):
+                        v = dd.get(lang_n, [None]*len(tijden))[i]
+                        if v is not None:
+                            rij[kort] = v
+        elif bron == "hkoL":
+            d = json.loads(pad.read_text())
+            for rij in d.get("data", []):
+                try:
+                    j, m, dg, v = int(rij[0]), int(rij[1]), int(rij[2]), float(rij[3])
+                    agg.setdefault("hongkong", {})[f"{j:04d}-{m:02d}-{dg:02d}"] = [99, v, True]
+                except (ValueError, IndexError):
+                    continue
 
-        Xg = np.vstack(Xg); yg = np.concatenate(yg)
-        Xn = np.vstack(Xn); yn = np.concatenate(yn)
-        n_cont = len(FEATS) + 3
-        gb = HistGradientBoostingRegressor(
-            max_iter=150, learning_rate=0.07, max_leaf_nodes=31, min_samples_leaf=40,
-            l2_regularization=1.0, categorical_features=[Xg.shape[1] - 1],
-            random_state=1).fit(Xg, yg)
-        mu_n = Xn[:, :n_cont].mean(0); sd_n = Xn[:, :n_cont].std(0); sd_n[sd_n == 0] = 1
-        Xn[:, :n_cont] = (Xn[:, :n_cont] - mu_n) / sd_n
-        nn = MLPRegressor(hidden_layer_sizes=(64, 32), activation="relu", alpha=1e-4,
-                          learning_rate_init=1e-3, batch_size=256, max_iter=250,
-                          early_stopping=True, validation_fraction=0.1,
-                          n_iter_no_change=12, random_state=1).fit(Xn, yn)
-
-        for key, (te, med, X_te, y_te) in blokken.items():
-            ex = [np.full(len(te), v) for v in extra[key]]
-            Xg_te = np.column_stack([X_te] + ex + [np.full(len(te), idx_s[key])])
-            fouten["gbm"].extend(np.abs(gb.predict(Xg_te) - y_te))
-            one = np.zeros((len(te), len(STEDEN))); one[:, idx_s[key]] = 1
-            Xn_te = np.column_stack([X_te] + ex + [one])
-            Xn_te[:, :n_cont] = (Xn_te[:, :n_cont] - mu_n) / sd_n
-            fouten["nn"].extend(np.abs(nn.predict(Xn_te) - y_te))
-
-        rij = [venster, len(yg)] + [round(float(np.mean(fouten[k])), 4)
-                                    for k in ("ridge", "gbm", "nn")]
-        with open(UIT, "a", newline="") as f:
-            csv.writer(f).writerow(rij)
-        print(f"  venster {venster:>4} d · train {len(yg):>6} rijen · "
-              f"MAE ridge {rij[2]} · gbm {rij[3]} · nn {rij[4]}", flush=True)
-
-    # ── extrapolatie: MAE(n) = a + b/√n per modelfamilie ─────────────────────
-    rijen = sorted(csv.DictReader(open(UIT)), key=lambda r: int(r["venster_dagen"]))
-    rijen = [r for r in rijen if int(r["venster_dagen"]) >= 360]
-    print("\nExtrapolatie op vensters ≥ 360 dagen (kortere missen hele seizoenen en")
-    print("meten seizoensdekking i.p.v. steekproefomvang). a + b/√n; indicatie, bovengrens:")
-    for k in ("ridge", "gbm", "nn"):
-        n  = np.array([min(int(r["venster_dagen"]), 660) for r in rijen], float)
-        ma = np.array([float(r[f"mae_{k}"]) for r in rijen])
-        A  = np.column_stack([np.ones(len(n)), 1 / np.sqrt(n)])
-        co, *_ = np.linalg.lstsq(A, ma, rcond=None)
-        v25 = co[0] + co[1] / math.sqrt(9400)
-        print(f"  {k:<6} asymptoot a = {co[0]:.3f} °C · bij 25 jaar ≈ {v25:.3f} °C "
-              f"(nu {ma[-1]:.3f})".replace(".", ","))
+    LANG.mkdir(exist_ok=True)
+    telling = []
+    for s in STEDEN:
+        key = s["key"]
+        with open(LANG / f"{key}.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["datum", "era5_max"] + AUX_KORT + ["station_max"])
+            n_st = 0
+            for dag in sorted(era[key]):
+                r = era[key][dag]
+                st = ""
+                e = agg.get(key, {}).get(dag)
+                if e and e[0] >= 8 and e[2]:
+                    st = round(e[1] if key == "hongkong" else f_naar_c(e[1]), 1)
+                    n_st += 1
+                w.writerow([dag, r.get("era5_max", "")] +
+                           [r.get(k, "") for k in AUX_KORT] + [st])
+        telling.append((key, n_st))
+    dun = sorted([t for t in telling if t[1] < 5000], key=lambda x: x[1])
+    print(f"{len(telling)} lange bestanden → {LANG}/")
+    print("steden met < 5000 stationsdagen (2000 t/m 2020):", dun if dun else "geen")
 
 if __name__ == "__main__":
-    run()
+    (fetch if (sys.argv[1:] or ["fetch"])[0] == "fetch" else build)()

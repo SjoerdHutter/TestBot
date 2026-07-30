@@ -1,139 +1,52 @@
-# Weerbot · modellen per stad (deel 2 en 3, versie met alle voorspellers)
-
-## Wat hier ligt
-
-| Bestand | Inhoud |
-|---|---|
-| `uit_features/<stad>.csv` | featurebestand per stad, 2021 t/m 28-07-2026, alles in °C |
-| `voorspellingen.csv` | alle out-of-sample testvoorspellingen (jan 2025 t/m jul 2026) |
-| `resultaten.csv` | MAE per variant, label, p-waarde en NGR-parameters per stad |
-| `resultaten_zonder_aux.csv` / `voorspellingen_zonder_aux.csv` | dezelfde backtest zónder de vijf weersvoorspellers, ter vergelijking |
-| `modellen/modellen.json` | eindmodel per stad (hertraind op alle data) |
-| `modellen/pooled_gbm.pkl` | gepoold boostingmodel over alle 51 steden (vangnet) |
-| `deel2_features.py` / `deel3_train.py` | hele pijplijn, herdraaibaar |
-
-## Doelvariabele
-
-Per stad de daghoogste van het **resolutiestation**: 49 steden via IEM METAR
-(daghoogste per lokale kalenderdag, geldig bij ≥ 8 waarnemingen waarvan ≥ 1
-tussen 10 en 18 u), Hongkong via het HKO-archief, Jinan via ERA5 (waarop die
-markt afrekent). Elke stad heeft > 1500 doeldagen.
-
-## Voorspellers (15)
-
-p1 per modelsysteem (IFS, AIFS, GFS, ICON, GEM) · inter-model-spreiding ·
-run-to-run-verandering (p1 tegenover p2) · doy_sin/doy_cos · lagfout (lag 2) ·
-en de vijf weersvariabelen: relatieve vochtigheid (daggem.), bewolking
-(daggem.), windmax, instralingssom, neerslagsom. De vijf komen uit het
-**ERA5-archief** (één bron voor alle 51 steden, volledig vanaf 2021).
-
-## Varianten, backtest en beslisregel
-
-Walk-forward met maandelijks bijtrainen, testen op jan 2025 t/m jul 2026
-(~570 testdagen per stad). Label **ML** alleen als de beste van ridge/gbm de
-huidige stijl (a + b·mm + g·lagfout) verslaat met ≥ 0,03 °C én ≥ 2% lagere MAE
-én gepaarde toets p < 0,05. Niet-backtestbaar (n_test < 120 of n_train < 250)
-zou GEPOOLD krijgen; kwam niet voor.
-
-## Uitkomst
-
-- **36 steden ML** (alle via ridge; boosting per stad verloor overal, conform
-  de evaluatie bij deze steekproefomvang), **1 GEPOOLD** (Austin),
-  **14 LINEAIR**.
-- Gemiddelde MAE over 51 steden: ruw 1,14 · ref_lin 0,89 · ridge 0,83 °C;
-  in de ML-steden gemiddeld 0,08 °C winst op de huidige stijl.
-- Effect van de vijf weersvoorspellers: ridge 0,85 → 0,83 °C en tien extra
-  ML-steden, vooral tropen- en kustklimaten (Singapore, Hongkong, Taipei,
-  Mexico-Stad, Wellington) waar bewolking en neerslagregime het maximum sturen.
-- NGR-spreiding (σ = √(c² + (d·spreiding)²), gefit op out-of-sample-fouten):
-  gemiddeld ~1% CRPS-winst boven vaste σ; bescheiden omdat de spreidingsmaat
-  een proxy is (inter-model-spreiding).
-
-## Eerlijke kanttekeningen
-
-1. De vijf weersvariabelen zijn **reanalysewaarden van dezelfde dag** (ERA5).
-   In bedrijf gebruikt de app de live-voorspelling van diezelfde variabelen
-   voor de doeldag (die bestaat op voorspelmoment), maar de backtest kan deze
-   features licht flatteren omdat reanalyse ≈ perfecte regime-informatie.
-   Advies: de ML-winst per stad blijven toetsen op de live-log van de app.
-2. Echte ensemble-ledenspreiding is vóór 2024 niet backfillbaar; gebruikt is
-   de inter-model-spreiding plus run-to-run-verandering.
-3. `ref_lin` is een gestileerde stand-in voor de app-correctie (zelfde
-   structuur, zonder EWMA/shrinkage).
-4. Training en MAE's in °C; voor de 11 VS-steden geldt ×1,8 voor °F.
-5. AIFS is één doorlopende reeks (oud ID t/m 11-03-2025, `_single` daarna).
-
-## Integratie in de app
-
-Voor ML-steden staat in `modellen.json` per stad: featurelijst, imputatie-
-medianen, standaardisatie (mu/sd), coëfficiënten en intercept: een handvol
-regels JavaScript in de PWA, geen zware afhankelijkheden. LINEAIR-steden
-hebben er hun a/b/g-coëfficiënten; Austin gebruikt `pooled_gbm.pkl` in de
-wekelijkse GitHub-workflow of valt tot integratie terug op de huidige lijn.
-
-## Stap 3 · uitgevoerd als experiment (deel 4)
-
-Een gepoold neuraal netwerk (MLP 64×32, stads-one-hot, zelfde 15 features,
-zelfde walk-forward en beslisregel) is getraind en getest: zie
-`deel4_nn.py`, `voorspellingen_nn.csv` en `resultaten_nn.csv`. Uitkomst:
-MAE ref_lin 0,89 · ridge 0,83 · NN 0,87 °C; het NN verslaat ridge in 1 van de
-51 steden, ridge verslaat het NN in 18; CRPS ridge 0,595 tegen NN 0,618.
-Conclusie: stap 3 is technisch uitvoerbaar maar bij dit datavolume aantoonbaar
-níet lonend; ridge + NGR blijft de kampioen. Herstart-trigger: opnieuw
-proberen zodra gepoolde boosting de per-stad ridge verslaat, of zodra het
-datavolume wezenlijk groeit (meer jaren, meer stations of echte ledenspreiding).
-
-## Toelatingstoets nieuwe modelfamilies (deel 5)
-
-Een nieuwe familie (zoals het NN) wordt per stad pas toegelaten als hij de
-zittende kampioen verslaat volgens de ML-regel in beide helften van de
-walk-forward, na Bonferroni-correctie (p × 51 < 0,05), en daarna 60 dagen
-standhoudt op de live-log. Uitkomst voor het NN: nul steden. Ook Parijs, de
-enige nominale winnaar tegen ridge, valt door de mand: p × 51 = 1,0, winst
-alleen in helft 1 (0,81 tegen 0,71) en verlies in helft 2 (0,68 tegen 0,70),
-en tegen Parijs' echte kampioen ref_lin is p = 0,15. Bij 51 toetsen op
-p < 0,05 zijn ~2 tot 3 valse winnaars verwacht; er was er precies 1.
-`deel5_robuustheid.py` draait deze toets automatisch mee bij elke hertraining.
-
-## Leercurve en 25-jaars-extrapolatie (deel 6)
-
-Vaste testset (jan t/m jul 2026), training op de laatste N dagen vóór 2026.
-Vensters korter dan een vol jaar zijn uit de extrapolatie gelaten (die missen
-hele seizoenen en meten seizoensdekking in plaats van steekproefomvang).
-Gemeten MAE (°C): ridge 0,855 → 0,848 → 0,830 en nn 0,901 → 0,886 → 0,864 bij
-360 → 480 → 660 dagen. De 1/√n-doortrekking naar 25 jaar (n ≈ 9400 per
-station): ridge ≈ 0,78, nn ≈ 0,79, gbm ≈ 0,85. Interpretatie: bij 25 jaar
-convergeren de beste families rond 0,78 tot 0,79 °C, zo'n 0,04 tot 0,05 °C
-(≈ 5 tot 6%) beter dan nu, als bovengrens. Zie `deel6_leercurve.py` en
-`leercurve.csv`. Kanttekening: echte data uit 2000 komt van veel zwakkere
-modelversies (niet-stationariteit); homogene reforecasts (GEFS v12
-2000 tot 2019, vrij op AWS; ECMWF ~20 jaar onder licentie) zijn dan de juiste
-bron, en zelfs daarmee blijft een versiekloof naar het huidige model bestaan.
-
-## Getraind op 2000 t/m 2020: het microklimaatmodel (deel 7 en 8)
-
-Archiefvoorspellingen van vóór 2021 bestaan niet in bruikbare vorm (de
-GEFS-reforecast is honderden GB aan GRIB), dus op 2000+ is het deel getraind
-dat daar wél van te leren valt en stabiel is over decennia: de systematische
-afwijking van elk station t.o.v. het ERA5-gridpunt (perfect prognosis).
-Deel 7 haalde daarvoor 21 jaar stationswaarnemingen (IEM/HKO) en ERA5-reeksen
-op; deel 8 traint per stad delta = station − ERA5 op gridtemperatuur, de vijf
-weersvariabelen en seizoen (49 steden; Jinan n.v.t., Istanbul te kort).
-
-Houdbaarheid op 2019 t/m 2020 (MAE van delta): nulmodel 1,30 · maand-
-klimatologie 1,11 · lineair 1,04 · gbm 1,00 °C. Het signaal is dus echt.
-In de walk-forward (kandidaat ridge+klim, gridtemperatuur = mm_gem):
-gemiddeld 0,832 → 0,825 °C, en vijf steden verbeteren volgens de vooraf
-vastgelegde upgrade-regel (ΔMAE ≥ 0,02 °C én p < 0,05 t.o.v. ridge):
-Dallas 0,96→0,93 · Atlanta 0,88→0,86 · Milaan 0,84→0,80 · Chengdu 1,02→1,00 ·
-Zhengzhou 0,90→0,87. Bewijskracht gelaagd: Milaan en Zhengzhou ook na
-Bonferroni; Dallas consistent in beide helften; Atlanta en Chengdu alleen de
-basisregel en dus met 60 dagen live-log te bevestigen. Geen labelwissels:
-geen enkele LINEAIR/GEPOOLD-stad haalde de strenge flip-toets.
-
-Serveren: voor de vijf staat in `modellen.json` de variant `ridge_klim` met
-de stage-A verwijzing (`stagea_gbm_<stad>.pkl`, wekelijkse workflow) en een
-lineaire stage-A-terugval (kale coëfficiënten, client-side bruikbaar). De
-overige 44 stage-A-modellen zijn regenereerbaar met
-`python3 deel8_klim.py stagea`. Kanttekeningen: zelfde aux-caveat als eerder;
-Qingdao's historie vóór 2021 is het oude vliegveld Liuting.
+stad,icao,markt_eenheid,n_train,n_test,mae_ruw,mae_ref_lin,mae_ridge,mae_gbm,mae_pooled,label,gekozen_variant,p_waarde,crps_constant,crps_ngr,ngr_c,ngr_d
+New York,KLGA,°F,876,572,1.241,1.001,0.889,1.196,0.992,ML,ridge,0.0,0.651,0.647,0.9,0.4
+Chicago,KORD,°F,876,572,1.03,0.935,0.916,1.215,1.069,LINEAIR,ref_lin,0.181,0.681,0.673,0.85,0.65
+Miami,KMIA,°F,876,572,0.966,0.611,0.587,0.701,0.609,LINEAIR,ref_lin,0.106,0.449,0.445,0.5,0.5
+Los Angeles,KLAX,°F,878,573,1.787,1.072,0.97,1.006,1.001,ML,ridge,0.003,0.71,0.704,0.9,0.35
+San Francisco,KSFO,°F,878,573,1.21,1.089,1.124,1.096,1.228,LINEAIR,ref_lin,0.833,0.781,0.777,1.2,0.3
+Seattle,KSEA,°F,878,573,1.011,0.811,0.757,0.837,0.787,ML,ridge,0.004,0.568,0.557,0.6,0.55
+Denver,KBKF,°F,870,566,1.324,1.069,1.013,1.29,1.06,ML,ridge,0.019,0.757,0.726,0.65,0.8
+Dallas,KDAL,°F,876,572,1.209,1.027,0.958,1.281,0.932,ML,ridge,0.01,0.692,0.688,0.95,0.45
+Houston,KHOU,°F,876,572,0.98,0.924,0.845,1.169,0.83,ML,ridge,0.0,0.619,0.614,0.8,0.5
+Austin,KAUS,°F,876,572,1.153,0.995,0.949,1.241,0.896,GEPOOLD,pooled,0.0,0.662,0.64,0.55,0.8
+Atlanta,KATL,°F,876,572,1.494,0.966,0.878,1.09,0.863,ML,ridge,0.0,0.639,0.632,0.85,0.6
+Londen,EGLC,°C,876,572,0.808,0.757,0.715,0.933,0.742,ML,ridge,0.003,0.519,0.514,0.65,0.75
+Parijs,LFPB,°C,876,572,0.797,0.733,0.742,0.93,0.707,LINEAIR,ref_lin,0.608,0.532,0.526,0.65,0.6
+Amsterdam,EHAM,°C,876,572,0.843,0.689,0.682,0.843,0.669,LINEAIR,ref_lin,0.576,0.499,0.492,0.6,0.6
+Madrid,LEMD,°C,876,572,0.856,0.744,0.776,0.834,0.778,LINEAIR,ref_lin,0.011,0.544,0.532,0.5,0.9
+Milaan,LIMC,°C,876,572,1.151,0.881,0.837,0.887,0.751,ML,ridge,0.016,0.601,0.598,0.9,0.45
+München,EDDM,°C,876,572,1.127,0.88,0.809,0.939,0.79,ML,ridge,0.002,0.588,0.584,0.8,0.5
+Warschau,EPWA,°C,876,572,0.929,0.809,0.733,0.976,0.753,ML,ridge,0.0,0.522,0.516,0.7,0.6
+Helsinki,EFHK,°C,876,572,0.96,0.809,0.759,0.98,0.91,ML,ridge,0.013,0.544,0.541,0.75,0.65
+Ankara,LTAC,°C,876,572,0.93,0.716,0.709,0.944,0.711,LINEAIR,ref_lin,0.589,0.522,0.518,0.7,0.6
+Tokio,RJTT,°C,876,572,0.875,0.882,0.82,0.904,0.874,ML,ridge,0.0,0.582,0.579,0.85,0.55
+Seoul,RKSI,°C,876,572,1.724,0.974,0.796,1.043,0.939,ML,ridge,0.0,0.582,0.573,0.7,0.45
+Busan,RKPK,°C,876,572,0.815,0.814,0.81,0.982,0.839,LINEAIR,ref_lin,0.739,0.588,0.582,0.75,0.6
+Taipei,RCSS,°C,736,432,2.016,1.115,1.045,1.084,1.036,ML,ridge,0.002,0.744,0.743,1.25,0.15
+Peking,ZBAA,°C,876,572,1.242,0.985,0.89,1.002,0.872,ML,ridge,0.001,0.646,0.643,0.9,0.45
+Shanghai,ZSPD,°C,876,572,1.428,0.89,0.78,0.882,0.836,ML,ridge,0.0,0.559,0.553,0.75,0.65
+Guangzhou,ZGGG,°C,876,572,1.517,1.073,0.999,1.077,1.012,ML,ridge,0.003,0.717,0.714,1.0,0.6
+Shenzhen,ZGSZ,°C,876,572,0.872,0.855,0.824,0.883,0.824,LINEAIR,ref_lin,0.076,0.6,0.6,1.1,0.0
+Chengdu,ZUUU,°C,876,572,1.434,1.184,1.021,1.063,1.035,ML,ridge,0.0,0.721,0.715,1.0,0.65
+Chongqing,ZUCK,°C,876,572,1.444,1.05,0.943,1.012,0.902,ML,ridge,0.0,0.669,0.667,1.05,0.35
+Wuhan,ZHHH,°C,876,572,1.107,0.978,0.867,1.021,0.877,ML,ridge,0.0,0.623,0.618,0.85,0.6
+Qingdao,ZSQD,°C,876,572,0.839,0.849,0.816,1.001,0.821,ML,ridge,0.046,0.604,0.595,0.7,0.7
+Jinan,ZSJN,°C,878,574,0.71,0.677,0.6,0.719,0.684,ML,ridge,0.0,0.435,0.43,0.55,0.4
+Zhengzhou,ZHCC,°C,876,572,1.083,1.048,0.904,1.008,0.904,ML,ridge,0.0,0.644,0.642,0.95,0.5
+Manila,RPLL,°C,876,572,1.46,0.823,0.83,0.835,0.819,LINEAIR,ref_lin,0.672,0.587,0.586,0.95,0.4
+Kuala Lumpur,WMKK,°C,876,572,1.295,0.991,0.873,0.948,0.931,ML,ridge,0.0,0.626,0.625,1.0,0.3
+Singapore,WSSS,°C,876,572,1.115,0.727,0.646,0.723,0.655,ML,ridge,0.0,0.461,0.46,0.7,0.4
+Karachi,OPKC,°C,874,570,0.958,0.76,0.745,0.828,0.79,LINEAIR,ref_lin,0.282,0.551,0.543,0.6,0.55
+Lucknow,VILK,°C,820,549,1.244,1.031,0.929,1.046,0.936,ML,ridge,0.001,0.676,0.664,0.7,0.45
+Jeddah,OEJN,°C,876,572,1.497,1.017,0.888,1.057,1.107,ML,ridge,0.0,0.63,0.627,0.9,0.3
+Toronto,CYYZ,°C,876,572,1.027,0.898,0.856,1.166,1.036,ML,ridge,0.002,0.632,0.62,0.7,0.7
+Mexico-Stad,MMMX,°C,876,572,0.751,0.745,0.694,0.765,0.731,ML,ridge,0.001,0.501,0.5,0.75,0.35
+Panama-Stad,MPMG,°C,869,566,1.256,0.76,0.75,0.836,0.739,LINEAIR,ref_lin,0.461,0.549,0.549,0.95,0.0
+Buenos Aires,SAEZ,°C,876,572,1.178,0.973,0.976,1.101,0.944,LINEAIR,ref_lin,0.844,0.717,0.709,0.9,0.55
+São Paulo,SBGR,°C,876,572,1.136,1.031,0.98,1.042,0.94,ML,ridge,0.019,0.706,0.698,0.9,0.65
+Kaapstad,FACT,°C,852,548,1.132,0.832,0.832,0.908,0.869,LINEAIR,ref_lin,0.989,0.614,0.605,0.75,0.35
+Wellington,NZWN,°C,878,574,1.157,0.754,0.723,0.747,0.762,ML,ridge,0.027,0.525,0.508,0.5,0.9
+Istanbul,LTFM,°C,876,572,0.836,0.847,0.787,0.952,0.785,ML,ridge,0.001,0.576,0.564,0.65,0.95
+Moskou,UUWW,°C,876,572,0.908,0.849,0.788,1.026,0.928,ML,ridge,0.001,0.568,0.561,0.75,0.6
+Tel Aviv,LLBG,°C,876,572,0.85,0.744,0.625,0.752,0.701,ML,ridge,0.0,0.448,0.445,0.65,0.5
+Hongkong,HKO,°C,878,546,1.643,0.87,0.765,0.829,0.778,ML,ridge,0.0,0.548,0.547,0.85,0.5

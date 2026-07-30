@@ -1,270 +1,239 @@
 #!/usr/bin/env python3
 """
-Backfill van Open-Meteo per stad, 2021-01-01 tot en met gisteren.
+Deel 2 · extra voorspellers en stationswaarnemingen, 2021 t/m gisteren.
 
-Per (stad, datum) worden verzameld, opgeslagen in graden Celsius:
-  era5_max     ERA5(T) reanalyse daghoogste  (waarneming-proxy op het gridpunt)
-  d0_<model>   dag-0 archief van de historical-forecast-api (kortste lead, ~analyse)
-  p1_<model>   echte forecast met 1 dag lead (previous-runs, uurmax over de lokale dag)
-  p2_<model>   idem met 2 dagen lead
+  fetch : haalt op (hervatbaar via dezelfde cache):
+          a) 5 extra dagvoorspellers per stad (Open-Meteo historical, best_match):
+             relatieve vochtigheid (gem), bewolking (gem), windmax, instralingssom,
+             neerslagsom
+          b) uurlijkse METAR-temperaturen van de 50 meetstations via IEM
+          c) HKO-daghoogsten voor Hongkong
+  build : voegt alles samen met de p1/p2-reeksen uit deel 1 tot een
+          featurebestand per stad in uit_features/ (alles in graden Celsius)
 
-Modellen: ecmwf_ifs025, ecmwf_aifs025, gfs_seamless, icon_seamless, gem_seamless.
-Archiefdiepte verschilt per model; wat ontbreekt blijft leeg.
-
-Gebruik:
-  python3 backfill_openmeteo.py fetch    # haalt alles op (hervatbaar, cache in cache/)
-  python3 backfill_openmeteo.py build    # bouwt CSV's uit de cache naar uit/
-Alleen stdlib. Bundelt 17 steden per aanroep en wacht netjes bij HTTP 429.
+python3 deel2_features.py fetch | build
 """
-
-import csv
-import hashlib
-import json
-import sys
-import time
-import urllib.request
-import urllib.error
-from datetime import date, timedelta
+import csv, io, json, math, sys, time, urllib.request, urllib.error
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-HIER   = Path(__file__).parent
-CACHE  = HIER / "cache"
-INDEX  = HIER / "cache_index.json"
-UIT    = HIER / "uit"
-STEDEN = json.load(open(HIER / "steden.json"))
+from backfill_openmeteo import (CACHE, HIER, STEDEN, EIND_DATUM, PAUZE,
+                                groepen, coord, jaarvensters,
+                                _index_lees, _index_schrijf)
 
-MODELLEN   = ["ecmwf_ifs025", "ecmwf_aifs025", "ecmwf_aifs025_single",
-              "gfs_seamless", "icon_seamless", "gem_seamless"]
-DAG0_BASIS = ["ecmwf_ifs025", "ecmwf_aifs025", "gfs_seamless", "icon_seamless", "gem_seamless"]
-BEGIN_JAAR = 2021
-EIND_DATUM = (date.today() - timedelta(days=1)).isoformat()
-BUNDEL     = 17          # steden per aanroep
-PAUZE      = 2.5         # seconden tussen aanroepen
+TZ  = json.load(open(HIER / "tijdzones.json"))
+UITF = HIER / "uit_features"
+AUX = ["relative_humidity_2m_mean", "cloud_cover_mean", "wind_speed_10m_max",
+       "shortwave_radiation_sum", "precipitation_sum"]
+AUX_KORT = ["rh_gem", "bewolking_gem", "wind_max", "instraling_som", "neerslag_som"]
 
-# Archiefstart per model bij de previous-runs API (gepeild 2026-07-29).
-PREV_START = {"gfs_seamless": 2021, "icon_seamless": 2024, "gem_seamless": 2024,
-              "ecmwf_ifs025": 2024, "ecmwf_aifs025": 2024,
-              "ecmwf_aifs025_single": 2025}   # opvolger van aifs025 vanaf feb 2025
+def iem_id(s):
+    ic = s["icao"]
+    return ic[1:] if ic.startswith("K") and len(ic) == 4 else ic
 
-# ── HTTP met herkansing en cache ─────────────────────────────────────────────
-
-def _haal(url: str, pogingen: int = 5):
+def _haal_tekst(url, pogingen=5, timeout=150):
     for p in range(pogingen):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "weerbot-backfill/1.0"})
-            with urllib.request.urlopen(req, timeout=180) as r:
-                return json.loads(r.read())
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode(errors="replace")
         except urllib.error.HTTPError as e:
             if e.code in (429, 503):
-                wacht = 10 * (p + 1)
-                print(f"      HTTP {e.code}, {wacht}s wachten...", flush=True)
-                time.sleep(wacht)
-                continue
+                print(f"      HTTP {e.code}, wachten...", flush=True)
+                time.sleep(12 * (p + 1)); continue
             raise
         except Exception:
             if p == pogingen - 1:
                 raise
-            time.sleep(6 * (p + 1))
-    raise RuntimeError("opgegeven na herhaald HTTP 429")
+            time.sleep(8 * (p + 1))
+    raise RuntimeError("opgegeven")
 
-
-def _index_lees() -> dict:
-    return json.loads(INDEX.read_text()) if INDEX.exists() else {}
-
-def _index_schrijf(idx: dict):
-    INDEX.write_text(json.dumps(idx))
-
-def gecachet(url: str, label: str, meta: dict):
-    """Antwoord + betekenis (bron, modellen, stedengroep) op schijf bewaren."""
+def gecachet_tekst(url, label, meta):
+    import hashlib
     CACHE.mkdir(exist_ok=True)
-    naam = hashlib.sha1(url.encode()).hexdigest()[:20] + ".json"
+    naam = hashlib.sha1(url.encode()).hexdigest()[:20] + ".txt"
     pad  = CACHE / naam
     idx  = _index_lees()
     if pad.exists() and naam in idx:
         return
     print(f"    {label}", flush=True)
     try:
-        d = _haal(url)
+        t = _haal_tekst(url)
     except Exception as e:
-        print(f"      OVERGESLAGEN ({e}); volgende run probeert opnieuw", flush=True)
-        time.sleep(PAUZE)
-        return
-    pad.write_text(json.dumps(d))
-    idx[naam] = meta
-    _index_schrijf(idx)
+        print(f"      OVERGESLAGEN ({e})", flush=True)
+        time.sleep(PAUZE); return
+    pad.write_text(t)
+    idx[naam] = meta; _index_schrijf(idx)
     time.sleep(PAUZE)
 
-# ── Aanroepen opbouwen ───────────────────────────────────────────────────────
-
-def groepen():
-    for i in range(0, len(STEDEN), BUNDEL):
-        yield i // BUNDEL, STEDEN[i:i + BUNDEL]
-
-def coord(groep):
-    la = ",".join(str(s["lat"]) for s in groep)
-    lo = ",".join(str(s["lon"]) for s in groep)
-    return f"?latitude={la}&longitude={lo}"
-
-def jaarvensters(vanaf_jaar: int):
-    eind = date.fromisoformat(EIND_DATUM)
-    for j in range(vanaf_jaar, eind.year + 1):
-        yield j, f"{j}-01-01", (f"{j}-12-31" if j < eind.year else EIND_DATUM)
-
 def fetch():
-    print(f"Backfill {BEGIN_JAAR}-01-01 t/m {EIND_DATUM} voor {len(STEDEN)} steden\n", flush=True)
+    print("B  IEM METAR-uurtemperaturen (10 stations per aanroep)")
+    stations = [s for s in STEDEN if s["key"] not in ("hongkong",)]
+    for c in range(0, len(stations), 10):
+        blok = stations[c:c + 10]
+        st_q = "&".join("station=" + iem_id(s) for s in blok)
+        for j, b, e in jaarvensters(2021):
+            e_d = date.fromisoformat(e)
+            url = ("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py?" + st_q +
+                   f"&data=tmpf&year1={j}&month1=1&day1=1"
+                   f"&year2={e_d.year}&month2={e_d.month}&day2={e_d.day}"
+                   "&tz=Etc%2FUTC&format=comma&latlon=no&missing=M&trace=T"
+                   "&direct=no&report_type=3")
+            gecachet_tekst(url, f"iem   blok {c//10+1}  {j}",
+                           {"bron": "iem", "stations": [iem_id(s) for s in blok]})
 
-    print("1/3  ERA5 daghoogsten (waarneming-proxy)")
+    print("C  HKO daghoogsten Hongkong")
+    for j in range(2021, date.fromisoformat(EIND_DATUM).year + 1):
+        url = ("https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
+               f"?dataType=CLMMAXT&rformat=json&station=HKO&year={j}")
+        gecachet_tekst(url, f"hko   {j}", {"bron": "hko", "jaar": j})
+    print("A  extra dagvoorspellers (historical-forecast, best_match)")
     for g, groep in groepen():
         sleutels = [s["key"] for s in groep]
-        for j, b, e in jaarvensters(BEGIN_JAAR):
-            url = ("https://archive-api.open-meteo.com/v1/archive" + coord(groep) +
-                   f"&daily=temperature_2m_max&start_date={b}&end_date={e}"
-                   "&temperature_unit=celsius&timezone=auto")
-            gecachet(url, f"era5  groep {g + 1}  {j}",
-                     {"bron": "era5", "modellen": [], "steden": sleutels})
+        # ERA5-archief: dezelfde vijf dagvariabelen, een bron voor alle steden.
+        # Wordt na de best_match-aanroepen ingelezen en overschrijft die, zodat
+        # elke stad exact dezelfde bron gebruikt (belangrijk voor het gepoolde model).
+        url = ("https://archive-api.open-meteo.com/v1/archive" + coord(groep) +
+               f"&daily={','.join(AUX)}&start_date=2021-01-01&end_date={EIND_DATUM}&timezone=auto")
+        gecachet_tekst(url, f"aux   groep {g+1}  archief 2021 t/m nu",
+                       {"bron": "aux", "steden": sleutels})
 
-    print("2/3  dag-0 archief (historical-forecast-api, 5 modellen per aanroep)")
-    for g, groep in groepen():
-        sleutels = [s["key"] for s in groep]
-        for j, b, e in jaarvensters(BEGIN_JAAR):
-            url = ("https://historical-forecast-api.open-meteo.com/v1/forecast" + coord(groep) +
-                   f"&daily=temperature_2m_max&models={','.join(DAG0_BASIS)}"
-                   f"&start_date={b}&end_date={e}&temperature_unit=celsius&timezone=auto")
-            gecachet(url, f"dag0  groep {g + 1}  {j}",
-                     {"bron": "dag0", "modellen": DAG0_BASIS, "steden": sleutels})
+    print("Klaar met ophalen.")
 
-    print("2b/3 dag-0 aanvulling ecmwf_aifs025_single (vanaf 2025)")
-    for g, groep in groepen():
-        sleutels = [s["key"] for s in groep]
-        for j, b, e in jaarvensters(2025):
-            url = ("https://historical-forecast-api.open-meteo.com/v1/forecast" + coord(groep) +
-                   "&daily=temperature_2m_max&models=ecmwf_aifs025_single"
-                   f"&start_date={b}&end_date={e}&temperature_unit=celsius&timezone=auto")
-            gecachet(url, f"dag0b groep {g + 1}  {j}",
-                     {"bron": "dag0", "modellen": ["ecmwf_aifs025_single"], "steden": sleutels})
+# ── build ────────────────────────────────────────────────────────────────────
 
-    print("3/3  previous-runs, echte lead 1 en 2 (uurdata, per modelpaar)")
-    paren = [("gfs_seamless",), ("ecmwf_ifs025", "ecmwf_aifs025"),
-             ("icon_seamless", "gem_seamless"), ("ecmwf_aifs025_single",)]
-    for paar in paren:
-        vanaf = min(PREV_START[m] for m in paar)
-        for g, groep in groepen():
-            sleutels = [s["key"] for s in groep]
-            for j, b, e in jaarvensters(vanaf):
-                url = ("https://previous-runs-api.open-meteo.com/v1/forecast" + coord(groep) +
-                       "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2"
-                       f"&models={','.join(paar)}&start_date={b}&end_date={e}"
-                       "&temperature_unit=celsius&timezone=auto")
-                gecachet(url, f"prev  {'+'.join(paar):<29} groep {g + 1}  {j}",
-                         {"bron": "prev", "modellen": list(paar), "steden": sleutels})
-    print("\nKlaar met ophalen.")
-
-# ── Cache uitlezen en samenvoegen ────────────────────────────────────────────
-
-def model_uit_sleutel(sleutel: str, modellen: list):
-    for m in MODELLEN:
-        if sleutel.endswith("_" + m):
-            return m
-    return modellen[0] if len(modellen) == 1 else None
-
-def dagmax_uit_uren(tijden, waarden, min_uren: int = 12):
-    """Max per lokale kalenderdag; minstens `min_uren` gevulde uren, anders leeg."""
-    per_dag = {}
-    for t, v in zip(tijden, waarden):
-        if v is not None:
-            per_dag.setdefault(t[:10], []).append(v)
-    return {dag: max(vs) for dag, vs in per_dag.items() if len(vs) >= min_uren}
+def f_naar_c(f): return (f - 32) * 5 / 9
 
 def build():
-    idx  = _index_lees()
-    data = {s["key"]: {} for s in STEDEN}          # key → datum → kolom → °C
+    idx = _index_lees()
+    # 1. basis: p1/p2 en era5 uit deel 1
+    basis = {}          # key → datum → dict
+    for r in csv.DictReader(open(HIER / "uit" / "alle_steden.csv")):
+        naam2key = getattr(build, "_n2k", None)
+        if naam2key is None:
+            naam2key = {s["naam"]: s["key"] for s in STEDEN}; build._n2k = naam2key
+        basis.setdefault(naam2key[r["stad"]], {})[r["datum"]] = r
 
-    def cel(key, dag, kolom, waarde):
-        data[key].setdefault(dag, {})[kolom] = round(float(waarde), 1)
-
-    print(f"{len(idx)} cache-bestanden verwerken...", flush=True)
-    for naam, meta in sorted(idx.items()):
-        pad = CACHE / naam
-        if not pad.exists():
+    # 2. aux-voorspellers
+    aux = {s["key"]: {} for s in STEDEN}
+    for naam, meta in idx.items():
+        if meta.get("bron") != "aux":
             continue
-        d = json.loads(pad.read_text())
-        lijst = d if isinstance(d, list) else [d]
-        sleutels = meta["steden"]
-        if len(lijst) != len(sleutels):
-            print(f"  LET OP {naam}: {len(lijst)} locaties, {len(sleutels)} verwacht")
-        for key, res in zip(sleutels, lijst):
-            if meta["bron"] in ("era5", "dag0") and "daily" in res:
-                blok = res["daily"]; tijden = blok["time"]
-                for sleutel, reeks in blok.items():
-                    if sleutel == "time":
-                        continue
-                    if meta["bron"] == "era5":
-                        kolom = "era5_max"
-                    else:
-                        m = model_uit_sleutel(sleutel, meta["modellen"])
-                        if m is None:
-                            continue
-                        kolom = "d0_" + m
-                    for t, v in zip(tijden, reeks):
-                        if v is not None:
-                            cel(key, t, kolom, v)
-            elif meta["bron"] == "prev" and "hourly" in res:
-                blok = res["hourly"]; tijden = blok["time"]
-                for sleutel, reeks in blok.items():
-                    if sleutel == "time":
-                        continue
-                    m = model_uit_sleutel(sleutel, meta["modellen"])
-                    if m is None:
-                        continue
-                    lead = "p1" if "previous_day1" in sleutel else "p2"
-                    for dag, mx in dagmax_uit_uren(tijden, reeks).items():
-                        cel(key, dag, f"{lead}_{m}", mx)
-    schrijf(data)
+        lijst = json.loads((CACHE / naam).read_text())
+        lijst = lijst if isinstance(lijst, list) else [lijst]
+        for key, res in zip(meta["steden"], lijst):
+            d = res.get("daily", {})
+            for i, t in enumerate(d.get("time", [])):
+                rij = {}
+                for lang, kort in zip(AUX, AUX_KORT):
+                    v = d.get(lang, [None]*len(d["time"]))[i]
+                    if v is not None:
+                        rij[kort] = v
+                if rij:
+                    aux[key].setdefault(t, {}).update(rij)
 
-def schrijf(data):
-    UIT.mkdir(exist_ok=True)
-    kolommen = (["era5_max"] + [f"d0_{m}" for m in MODELLEN] +
-                [f"p1_{m}" for m in MODELLEN] + [f"p2_{m}" for m in MODELLEN])
-    kop = ["datum", "stad", "icao", "markt_eenheid"] + kolommen + ["eenheid_bestand"]
+    # 3. IEM-stationswaarnemingen → daghoogste per lokale kalenderdag
+    per_station = {}    # iem-id → list[(utc_dt, tmpf)]
+    for naam, meta in idx.items():
+        if meta.get("bron") != "iem":
+            continue
+        for regel in (CACHE / naam).read_text().splitlines():
+            if regel.startswith("#") or regel.startswith("station,"):
+                continue
+            d = regel.split(",")
+            if len(d) < 3 or d[2] in ("M", ""):
+                continue
+            try:
+                per_station.setdefault(d[0], []).append(
+                    (datetime.strptime(d[1], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc),
+                     float(d[2])))
+            except ValueError:
+                continue
 
-    dekking = []
-    with open(UIT / "alle_steden.csv", "w", newline="") as fc:
-        wc = csv.writer(fc); wc.writerow(kop)
-        for s in STEDEN:
-            key = s["key"]; rijen = data[key]
-            f_stad = s["eenheid"] == "F"
-            eenheid_markt = "°F" if f_stad else "°C"
-            with open(UIT / f"{key}.csv", "w", newline="") as fs:
-                ws = csv.writer(fs); ws.writerow(kop)
-                for dag in sorted(rijen):
-                    r = rijen[dag]
-                    def w(k, naar_f):
-                        v = r.get(k)
-                        if v is None:
-                            return ""
-                        return round(v * 9 / 5 + 32, 1) if naar_f else v
-                    basis = [dag, s["naam"], s["icao"], eenheid_markt]
-                    ws.writerow(basis + [w(k, f_stad) for k in kolommen] + [eenheid_markt])
-                    wc.writerow(basis + [w(k, False) for k in kolommen] + ["°C"])
-            eerste = {k: min((dg for dg, r in rijen.items() if k in r), default="")
-                      for k in kolommen}
-            n_per  = {k: sum(1 for r in rijen.values() if k in r) for k in kolommen}
-            dekking.append([s["naam"], s["icao"], len(rijen)] +
-                           [x for k in kolommen for x in (n_per[k], eerste[k])])
+    station_max = {s["key"]: {} for s in STEDEN}
+    for s in STEDEN:
+        if s["key"] == "hongkong":
+            continue
+        tz = ZoneInfo(TZ[s["key"]])
+        per_dag = {}
+        for dt_utc, tf in per_station.get(iem_id(s), []):
+            lok = dt_utc.astimezone(tz)
+            per_dag.setdefault(lok.date().isoformat(), []).append((lok.hour, tf))
+        for dag, obs in per_dag.items():
+            # geldigheidseis: minstens 8 waarnemingen en minstens één tussen 10 en 18 u
+            if len(obs) >= 8 and any(10 <= u <= 18 for u, _ in obs):
+                station_max[s["key"]][dag] = round(f_naar_c(max(t for _, t in obs)), 1)
 
-    with open(UIT / "dekking.csv", "w", newline="") as fd:
-        wd = csv.writer(fd)
-        wd.writerow(["stad", "icao", "n_dagen"] +
-                    [x for k in kolommen for x in (f"n_{k}", f"eerste_{k}")])
-        wd.writerows(dekking)
-    print(f"Geschreven: {len(STEDEN)} stads-CSV's + alle_steden.csv + dekking.csv → {UIT}/")
+    # 4. HKO
+    for naam, meta in idx.items():
+        if meta.get("bron") != "hko":
+            continue
+        d = json.loads((CACHE / naam).read_text())
+        for rij in d.get("data", []):
+            try:
+                j, m, dg, v = int(rij[0]), int(rij[1]), int(rij[2]), float(rij[3])
+                station_max["hongkong"][f"{j:04d}-{m:02d}-{dg:02d}"] = v
+            except (ValueError, IndexError):
+                continue
 
+    # 5. samenvoegen en wegschrijven
+    UITF.mkdir(exist_ok=True)
+    P1 = ["p1_ecmwf_ifs025", "p1_ecmwf_aifs025", "p1_ecmwf_aifs025_single",
+          "p1_gfs_seamless", "p1_icon_seamless", "p1_gem_seamless"]
+    P2 = [k.replace("p1_", "p2_") for k in P1]
+    kop = (["datum", "p1_ifs", "p1_aifs", "p1_gfs", "p1_icon", "p1_gem",
+            "p2_ifs", "p2_aifs", "p2_gfs", "p2_icon", "p2_gem",
+            "mm_gem", "mm_spreiding", "run2run"] + AUX_KORT +
+           ["doy_sin", "doy_cos", "era5_max", "station_max", "doel", "doelbron"])
+
+    telling = []
+    for s in STEDEN:
+        key = s["key"]
+        with open(UITF / f"{key}.csv", "w", newline="") as f:
+            w = csv.writer(f); w.writerow(kop)
+            n_doel = 0
+            for dag in sorted(basis.get(key, {})):
+                b = basis[key][dag]
+                def g(k):
+                    v = b.get(k, "")
+                    return float(v) if v else None
+                p1 = {"ifs": g(P1[0]),
+                      "aifs": g(P1[2]) if g(P1[2]) is not None else g(P1[1]),
+                      "gfs": g(P1[3]), "icon": g(P1[4]), "gem": g(P1[5])}
+                p2 = {"ifs": g(P2[0]),
+                      "aifs": g(P2[2]) if g(P2[2]) is not None else g(P2[1]),
+                      "gfs": g(P2[3]), "icon": g(P2[4]), "gem": g(P2[5])}
+                p1v = [v for v in p1.values() if v is not None]
+                p2v = [v for v in p2.values() if v is not None]
+                mm = sp = r2r = None
+                if len(p1v) >= 4:
+                    mm = sum(p1v) / len(p1v)
+                    sp = (sum((x - mm) ** 2 for x in p1v) / (len(p1v) - 1)) ** 0.5
+                    if len(p2v) >= 4:
+                        r2r = mm - sum(p2v) / len(p2v)
+                a = aux[key].get(dag, {})
+                dt = date.fromisoformat(dag)
+                doy = dt.timetuple().tm_yday / 365.25 * 2 * math.pi
+                stm = station_max[key].get(dag)
+                if key == "jinan":
+                    doel, bron = g("era5_max"), "era5"
+                else:
+                    doel, bron = stm, ("station" if stm is not None else "")
+                if doel is not None:
+                    n_doel += 1
+                rond = lambda v, d=1: ("" if v is None else round(v, d))
+                w.writerow([dag] +
+                           [rond(p1[k]) for k in ("ifs","aifs","gfs","icon","gem")] +
+                           [rond(p2[k]) for k in ("ifs","aifs","gfs","icon","gem")] +
+                           [rond(mm, 2), rond(sp, 2), rond(r2r, 2)] +
+                           [a.get(k, "") for k in AUX_KORT] +
+                           [round(math.sin(doy), 4), round(math.cos(doy), 4),
+                            b.get("era5_max", ""), rond(stm), rond(doel), bron])
+        telling.append((key, n_doel))
+    dun = [t for t in telling if t[1] < 1500]
+    print(f"{len(telling)} featurebestanden → {UITF}/")
+    print("steden met < 1500 doeldagen:", dun if dun else "geen")
 
 if __name__ == "__main__":
-    stap = sys.argv[1] if len(sys.argv) > 1 else "fetch"
-    if stap == "fetch":
-        fetch()
-    elif stap == "build":
-        build()
-    else:
-        print(__doc__)
+    (fetch if (sys.argv[1:] or ["fetch"])[0] == "fetch" else build)()
