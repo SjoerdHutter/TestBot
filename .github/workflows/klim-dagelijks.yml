@@ -1,7 +1,7 @@
 name: Dagelijkse klim-berekening
 on:
   schedule:
-    - cron: "23 2,14 * * *"   # tweemaal daags, 02:23 en 14:23 UTC
+    - cron: "23 2,14 * * *"
   workflow_dispatch:
 permissions:
   contents: write
@@ -15,28 +15,19 @@ jobs:
           python-version: "3.12"
       - run: pip install numpy "scikit-learn>=1.8,<1.9"
 
-      # Zoekt de modellenmap, waar hij ook in de repository staat.
-      - name: Modellenmap zoeken
-        id: zoek
-        run: |
-          pad=$(find . -name bereken_klim_vandaag.py -not -path './.git/*' -print -quit)
-          if [ -z "$pad" ]; then
-            echo "::error::bereken_klim_vandaag.py niet gevonden. Staat de map weerbot-modellen wel in de repository?"
-            exit 1
-          fi
-          map=$(dirname "$pad")
-          echo "gevonden in: $map"
-          echo "map=$map" >> "$GITHUB_OUTPUT"
+      # Controleert of de upload gaaf is aangekomen (grootte + sha256).
+      - name: Upload controleren
+        run: python weerbot-modellen/controleer_upload.py
 
       - name: klim_vandaag.json berekenen
-        working-directory: ${{ steps.zoek.outputs.map }}
+        working-directory: weerbot-modellen
         run: python bereken_klim_vandaag.py
 
       - name: Committen
         run: |
           git config user.name "weerbot-actie"
           git config user.email "actions@users.noreply.github.com"
-          git add "${{ steps.zoek.outputs.map }}/klim_vandaag.json"
+          git add weerbot-modellen/klim_vandaag.json
           git diff --cached --quiet || git commit -m "Dagelijkse klim-waarden"
           git push
 
