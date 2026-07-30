@@ -68,6 +68,16 @@ BURN_EVALUATIE = 60    # evaluatie start hier zodat er restfoutkwantielen zijn
 # de spreiding tussen de modelsystemen en per model de afwijking van het
 # gemiddelde. Die laatste groep laat het model leren dat bijvoorbeeld "ICON
 # hoger dan de rest" iets anders betekent dan "IFS hoger dan de rest".
+#
+# Onderzocht en verworpen (walk forward op de featurebundel, 2026-07): een
+# gradient-boosting-model op dezelfde features, elke 30 dagen hertraind,
+# verliest ruim van deze ridge (MAE 0,87 tegen 0,80 over 17 steden) en maakt
+# ook elk mengsel slechter: de restfout is in essentie lineair. Ook zonder
+# effect: een globale coefficientenprior over steden, debias-weging per model
+# en de mediaan in plaats van het gewogen gemiddelde. ERA5-weersvariabelen
+# (bewolking, instraling) lijken 3% te geven maar dat is lek: het effect
+# verdwijnt zodra je ze een dag verschuift, dus het is analyse van de doeldag
+# zelf, geen voorspelling.
 KERN_FEATURES = ["mu", "lag", "spreiding"] + ["d_" + m for m in MODELLEN]
 HALFWAARDE_KERN = 60.0   # tragere vergeetsnelheid: meer coefficienten om te schatten
 ALPHA_KERN = 30.0        # ridge-straf op gestandaardiseerde features
