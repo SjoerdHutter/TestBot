@@ -14,14 +14,29 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install numpy "scikit-learn>=1.8,<1.9" scipy
+
+      - name: Modellenmap zoeken
+        id: zoek
+        run: |
+          pad=$(find . -name deel9_wekelijks.py -not -path './.git/*' -print -quit)
+          if [ -z "$pad" ]; then
+            echo "::error::deel9_wekelijks.py niet gevonden. Staat de map weerbot-modellen wel in de repository?"
+            exit 1
+          fi
+          map=$(dirname "$pad")
+          echo "gevonden in: $map"
+          echo "map=$map" >> "$GITHUB_OUTPUT"
+
       - name: Data bijwerken en modellen hertrainen
-        working-directory: weerbot-modellen
+        working-directory: ${{ steps.zoek.outputs.map }}
         run: python deel9_wekelijks.py
+
       - name: Wijzigingen committen
         run: |
+          m="${{ steps.zoek.outputs.map }}"
           git config user.name "weerbot-actie"
           git config user.email "actions@users.noreply.github.com"
-          git add weerbot-modellen/uit_features weerbot-modellen/klim_features.csv \
-                  weerbot-modellen/modellen/modellen.json weerbot-modellen/modellen/pooled_gbm.pkl
+          git add "$m/uit_features" "$m/klim_features.csv" \
+                  "$m/modellen/modellen.json" "$m/modellen/pooled_gbm.pkl"
           git diff --cached --quiet || git commit -m "Wekelijkse hertraining"
           git push
