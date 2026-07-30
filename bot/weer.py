@@ -552,7 +552,8 @@ def print_stats(rijen: dict) -> None:
     st   = statistieken(rijen)
     corr = leer_correcties(rijen)
     namen = {"0": "vandaag", "1": "morgen", "2": "overmorgen"}
-    print(f"\n  {'Stad':<15}{'horizon':<12}{'n':>4}{'bias':>8}{'ruw \u00b1':>8}{'na corr \u00b1':>11}")
+    kop_ruw, kop_corr = "ruw \u00b1", "na corr \u00b1"
+    print(f"\n  {'Stad':<15}{'horizon':<12}{'n':>4}{'bias':>8}{kop_ruw:>8}{kop_corr:>11}")
     print("  " + "\u2500" * 60)
     for stad in STEDEN:
         per = st.get(stad["key"], {})

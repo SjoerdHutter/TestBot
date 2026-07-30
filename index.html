@@ -467,11 +467,25 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
   }
   const HORIZON_NAAM = { 0: "vandaag", 1: "morgen", 2: "overm." };
   const MODEL_NAAM = { ecmwf_ifs025: "IFS", ecmwf_aifs025: "AIFS", gfs_seamless: "GEFS",
-                       ncep_gefs025: "GEFS", icon_seamless: "ICON", gem_seamless: "GEM", gem_global: "GEM" };
-  // Koppeling: gescoorde backtestmodellen -> hun ensembleversie in de live fetch
-  const PARAM_NAAR_ENS = { ecmwf_ifs025: "ecmwf_ifs025", gfs_seamless: "ncep_gefs025",
-                           icon_seamless: "icon_seamless", gem_seamless: "gem_global", ecmwf_aifs025: "ecmwf_aifs025" };
+                       ncep_gefs025: "GEFS", icon_seamless: "ICON", gem_seamless: "GEM", gem_global: "GEM",
+                       ifs: "IFS", aifs: "AIFS", gfs: "GEFS", icon: "ICON", gem: "GEM" };
+  /* Elke API noemt dezelfde modellen anders (de ensemble-API kent ecmwf_aifs025,
+     de deterministische ecmwf_aifs025_single). Binnen de app is de korte naam
+     leidend; KORT_VAN vertaalt elke variant die langskomt. */
+  const KORT_VAN = { ecmwf_ifs025: "ifs", ecmwf_aifs025: "aifs", ecmwf_aifs025_single: "aifs",
+                     gfs_seamless: "gfs", ncep_gefs025: "gfs", icon_seamless: "icon",
+                     gem_seamless: "gem", gem_global: "gem",
+                     ifs: "ifs", aifs: "aifs", gfs: "gfs", icon: "icon", gem: "gem" };
+  const KERN_MODELLEN = ["ifs", "aifs", "gfs", "icon", "gem"];
   const ENS_MODELLEN = ["ecmwf_ifs025", "ecmwf_aifs025", "ncep_gefs025", "icon_seamless", "gem_global"];
+  function kortMap(perModel) {
+    const uit = {};
+    for (const m in perModel) {
+      const k = KORT_VAN[m];
+      if (k && perModel[m] !== null && perModel[m] !== undefined) uit[k] = perModel[m];
+    }
+    return uit;
+  }
 
   function bewaar(sleutel, obj) { try { localStorage.setItem(sleutel, JSON.stringify(obj)); } catch (e) {} }
   function lees(sleutel) { try { return JSON.parse(localStorage.getItem(sleutel)); } catch (e) { return null; } }
@@ -562,8 +576,52 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
   function alleSteden() { return CONFIG.steden.concat(eigenSteden()); }
 
   /* ── Automatische backtest voor zelf toegevoegde steden ── */
-  const KAL = { dagen: 140, half: 14, burnG: 10, burnR: 30, burnE: 60, krimp: 30, ridge: 0.25, maxAfstand: 80 };
-  const KAL_MODELLEN = ["ecmwf_ifs025", "ecmwf_aifs025", "gfs_seamless", "icon_seamless", "gem_seamless"];
+  const KAL = { dagen: 140, half: 14, burnG: 10, burnR: 30, burnE: 60, krimp: 30, ridge: 0.25,
+                maxAfstand: 80, halfKern: 60, alphaKern: 30 };
+  /* De deterministische APIs kennen AIFS als ecmwf_aifs025_single; onder de naam
+     ecmwf_aifs025 kwam er nooit een reeks terug. Lukt de voorkeursnaam niet, dan
+     wordt eenmalig de andere geprobeerd en onthouden. */
+  const AIFS_NAMEN = ["ecmwf_aifs025_single", "ecmwf_aifs025"];
+  const aifsGekozen = lees("weerbot-aifs-naam") || {};
+  function kalModellen(soort) {
+    const aifs = aifsGekozen[soort] || AIFS_NAMEN[0];
+    return ["ecmwf_ifs025", aifs, "gfs_seamless", "icon_seamless", "gem_seamless"];
+  }
+  /* Haalt op met de voorkeursnaam en probeert eenmalig de andere als er geen
+     AIFS-reeks in het antwoord zit. Geeft {json, modellen}. */
+  function haalMetAifs(soort, bouw, heeftAifs) {
+    const namen = aifsGekozen[soort] ? [aifsGekozen[soort]] : AIFS_NAMEN.slice();
+    function poging(i, reserve) {
+      if (i >= namen.length) {
+        if (reserve) {
+          aifsGekozen[soort] = reserve.aifs;
+          bewaar("weerbot-aifs-naam", aifsGekozen);
+          return Promise.resolve(reserve);
+        }
+        return Promise.reject(new Error("geen antwoord"));
+      }
+      const aifs = namen[i];
+      const modellen = ["ecmwf_ifs025", aifs, "gfs_seamless", "icon_seamless", "gem_seamless"];
+      return haalMetHerkansing(bouw(modellen)).then(function (j) {
+        const uit = { json: j, modellen: modellen, aifs: aifs };
+        if (heeftAifs(j, aifs) || namen.length === 1) {
+          aifsGekozen[soort] = aifs;
+          bewaar("weerbot-aifs-naam", aifsGekozen);
+          return uit;
+        }
+        return poging(i + 1, reserve || uit);
+      }).catch(function (e) {
+        if (i + 1 >= namen.length && !reserve) throw e;
+        return poging(i + 1, reserve);
+      });
+    }
+    return poging(0, null);
+  }
+  /* De uurcurves komen van de gewone forecast-API, die AIFS onder de oude naam
+     kent; die aanroep blijft daarom ongewijzigd. */
+  const UUR_MODELLEN = ["ecmwf_ifs025", "ecmwf_aifs025", "gfs_seamless", "icon_seamless", "gem_seamless"];
+  const KERN_FEATURES = ["mu", "lag", "spreiding"].concat(
+    ["ifs", "aifs", "gfs", "icon", "gem"].map(function (m) { return "d_" + m; }));
   const kalibratieBezig = new Set();
   const kalibratieMislukt = new Set();
   let herlaadTimer = null;
@@ -667,16 +725,20 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       });
   }
 
-  function walkForwardJS(rec) {
+  function walkForwardJS(rec, lagDagen) {
+    lagDagen = lagDagen || LAGV;
     const n = rec.length;
-    const muRaw = new Array(n), yhat = new Array(n);
-    const rb = new Array(n), rn = new Array(n), spreid = new Array(n), sigA = new Array(n);
-    const fouten = [], rest = [], dekk = [];
+    const muRaw = new Array(n), yhat = new Array(n), yhatK = new Array(n);
+    const rb = new Array(n), rn = new Array(n), rk = new Array(n);
+    const spreid = new Array(n), sigA = new Array(n);
+    const fouten = [], foutenK = [], rest = [], dekk = [];
     let laatsteG = null, laatsteAB = [0, 1];
+    const kern = maakKern(KERN_FEATURES.length, KAL.halfKern, KAL.alphaKern);
+    const residK = {};
 
     function lagIdx(t) {
       for (let s2 = t - 1; s2 >= 0; s2--) {
-        if (rec[s2].o <= rec[t].o - LAGV && rn[s2] !== undefined) return s2;
+        if (rec[s2].o <= rec[t].o - lagDagen && rn[s2] !== undefined) return s2;
       }
       return null;
     }
@@ -693,11 +755,11 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       const ne = nEff2(wl);
       return Math.min(0.5, Math.max(0, (sxy / sxx) * ne / (ne + 40)));
     }
-    function sigFit(t, ref) {
+    function sigFit(t, ref, rez) {
       const paren = [];
       for (let s2 = 0; s2 < t; s2++) {
-        if (rn[s2] !== undefined && spreid[s2] !== undefined) {
-          paren.push([ewmaW(ref - rec[s2].o), spreid[s2], Math.abs(rn[s2])]);
+        if (rez[s2] !== undefined && spreid[s2] !== undefined) {
+          paren.push([ewmaW(ref - rec[s2].o), spreid[s2], Math.abs(rez[s2])]);
         }
       }
       if (paren.length < 20) return null;
@@ -712,7 +774,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       const dt = rec[t].o, fct = rec[t].fc, yt = rec[t].y;
       let gew = {};
       if (t >= KAL.burnG) {
-        KAL_MODELLEN.forEach(function (m) {
+        KERN_MODELLEN.forEach(function (m) {
           const paren = [];
           for (let s2 = 0; s2 < t; s2++) {
             if (rec[s2].fc[m] !== undefined) {
@@ -757,33 +819,50 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       const gL = t >= KAL.burnR + 10 ? gFit(t, dt) : 0;
       const li = lagIdx(t);
       const yhatN = yhat[t] + (li !== null ? gL * rn[li] : 0);
-      const cd = sigFit(t, dt);
-      if (cd) {
-        let sp = spreid[t];
-        if (sp === undefined) {
-          const sps = spreid.slice(0, t).filter(function (x2) { return x2 !== undefined; });
-          sp = sps.length ? sps.reduce(function (x2, y2) { return x2 + y2; }, 0) / sps.length : 0;
-        }
-        sigA[t] = Math.max(0.2, cd[0] + cd[1] * sp);
-      }
+
+      // de kern loopt ernaast: pas als hij op het evaluatievenster wint gaat hij mee
+      const xt = kernVector(muRaw[t], kernLag(residK, dt, lagDagen), spreid[t], fct);
+      yhatK[t] = muRaw[t] + kern.voorspel(xt);
 
       if (t >= KAL.burnE) {
         fouten.push(Math.abs(yt - yhatN));
-        if (rest.length >= 20) {
-          const paren = rest.map(function (r2) { return [ewmaW(dt - r2[0]), r2[1]]; });
-          dekk.push([wKwant2(paren, 0.10), wKwant2(paren, 0.90), yt - yhatN]);
-        }
+        foutenK.push(Math.abs(yt - yhatK[t]));
       }
+      residK[dt] = yt - yhatK[t];
+      kern.voegToe(dt, xt, yt - muRaw[t]);
       if (t >= KAL.burnR) {
         rb[t] = yt - yhat[t];
         rn[t] = yt - yhatN;
+        rk[t] = yt - yhatK[t];
         rest.push([dt, rn[t]]);
       }
     }
     if (rest.length < 20 || !fouten.length) return null;
+    const gem = function (v) { return v.reduce(function (x, y) { return x + y; }, 0) / v.length; };
+    const maeOud = gem(fouten), maeKern = gem(foutenK);
+    const kernWint = maeKern <= maeOud;
+    const rez = kernWint ? rk : rn;
+
+    // tweede pas: de band hoort bij de restfouten van de gekozen correctie
     const factor = (CONFIG.params && CONFIG.params.band_factor) || 1.1;
     const vandaagO = rec[n - 1].o + 1;
-    const parenRest = rest.map(function (r2) { return [ewmaW(vandaagO - r2[0]), r2[1]]; });
+    const klaar = [];
+    for (let s2 = 0; s2 < n; s2++) if (rez[s2] !== undefined) klaar.push([rec[s2].o, rez[s2]]);
+    for (let t = 0; t < n; t++) {
+      const cd = sigFit(t, rec[t].o, rez);
+      if (!cd) continue;
+      let sp = spreid[t];
+      if (sp === undefined) {
+        const sps = spreid.slice(0, t).filter(function (x2) { return x2 !== undefined; });
+        sp = sps.length ? sps.reduce(function (x2, y2) { return x2 + y2; }, 0) / sps.length : 0;
+      }
+      sigA[t] = Math.max(0.2, cd[0] + cd[1] * sp);
+      if (t < KAL.burnE || rez[t] === undefined) continue;
+      const eerder = klaar.filter(function (p) { return p[0] < rec[t].o; })
+                          .map(function (p) { return [ewmaW(rec[t].o - p[0]), p[1]]; });
+      if (eerder.length >= 20) dekk.push([wKwant2(eerder, 0.10), wKwant2(eerder, 0.90), rez[t]]);
+    }
+    const parenRest = klaar.map(function (r2) { return [ewmaW(vandaagO - r2[0]), r2[1]]; });
     let raak = 0;
     dekk.forEach(function (d) { if (factor * d[0] <= d[2] && d[2] <= factor * d[1]) raak++; });
     let aand = null;
@@ -794,20 +873,32 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     const uit2 = {
       a: Math.round(laatsteAB[0] * 1000) / 1000, b: Math.round(laatsteAB[1] * 1000) / 1000,
       g: Math.round(gFit(n, vandaagO) * 1000) / 1000,
+      lag_dagen: lagDagen,
       res_q10: Math.round(wKwant2(parenRest, 0.10) * factor * 100) / 100,
       res_q90: Math.round(wKwant2(parenRest, 0.90) * factor * 100) / 100,
       gewichten: aand,
-      mae_nieuw: Math.round(fouten.reduce(function (x, y) { return x + y; }, 0) / fouten.length * 100) / 100,
+      mae_oud: Math.round(maeOud * 100) / 100,
+      mae_kern: Math.round(maeKern * 100) / 100,
+      mae_nieuw: Math.round((kernWint ? maeKern : maeOud) * 100) / 100,
       dekking: dekk.length ? Math.round(raak / dekk.length * 1000) / 1000 : null,
       n_eval: fouten.length, n_totaal: n
     };
+    if (kernWint) {
+      const c = kern.coef();
+      if (c) {
+        uit2.kern = { features: KERN_FEATURES.slice(),
+                      intercept: Math.round(c[0] * 10000) / 10000,
+                      coef: c[1].map(function (x) { return Math.round(x * 100000) / 100000; }),
+                      lag_dagen: lagDagen };
+      }
+    }
     // spreidingsband alleen als de weekkalibratie die variant ook gebruikt
     if (PARAMS.spreidingsband) {
-      const cdE = sigFit(n, vandaagO);
+      const cdE = sigFit(n, vandaagO, rez);
       if (cdE) {
         const zp = [];
         for (let s2 = 0; s2 < n; s2++) {
-          if (rn[s2] !== undefined && sigA[s2]) zp.push([ewmaW(vandaagO - rec[s2].o), rn[s2] / sigA[s2]]);
+          if (rez[s2] !== undefined && sigA[s2]) zp.push([ewmaW(vandaagO - rec[s2].o), rez[s2] / sigA[s2]]);
         }
         if (zp.length >= 20) {
           const facS = PARAMS.band_factor_s || factor;
@@ -824,24 +915,71 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     return uit2;
   }
 
+  /* De modelnaam staat achteraan de reekssleutel; die lezen we uit het antwoord
+     zelf, zodat het niet uitmaakt onder welke naam een API zijn AIFS levert.
+     Geeft {datum: {kort model: dagmax}} met korte modelnamen. */
+  function prevUit(json, horizon) {
+    const H = (json && json.hourly) || {};
+    const tijden = H.time || [];
+    const uit = {};
+    for (const sleutel in H) {
+      const kop = "temperature_2m_previous_day" + horizon + "_";
+      if (sleutel.indexOf(kop) !== 0) continue;
+      const kort = KORT_VAN[sleutel.slice(kop.length)];
+      if (!kort) continue;
+      const per = {};
+      for (let i = 0; i < tijden.length; i++) {
+        const v = H[sleutel][i];
+        if (v === null || v === undefined) continue;
+        (per[tijden[i].slice(0, 10)] = per[tijden[i].slice(0, 10)] || []).push(v);
+      }
+      for (const dag in per) {
+        if (per[dag].length >= 12) (uit[dag] = uit[dag] || {})[kort] = Math.max.apply(null, per[dag]);
+      }
+    }
+    return uit;
+  }
+
+  function histUit(json) {
+    const D = (json && json.daily) || {};
+    const tijden = D.time || [];
+    const uit = {};
+    for (const sleutel in D) {
+      if (sleutel.indexOf("temperature_2m_max_") !== 0) continue;
+      const kort = KORT_VAN[sleutel.slice("temperature_2m_max_".length)];
+      if (!kort) continue;
+      tijden.forEach(function (dag, i) {
+        const v = D[sleutel][i];
+        if (v !== null && v !== undefined) (uit[dag] = uit[dag] || {})[kort] = v;
+      });
+    }
+    return uit;
+  }
+
   function kalibreerStad(s) {
     const eind = new Date(Date.now() - 3 * 86400000);
     const begin = new Date(eind.getTime() - KAL.dagen * 86400000);
     const unit = s.eenheid === "\u00B0F" ? "fahrenheit" : "celsius";
-    const prevUrl = "https://previous-runs-api.open-meteo.com/v1/forecast" +
-      "?latitude=" + s.lat + "&longitude=" + s.lon +
-      "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2" +
-      "&models=" + KAL_MODELLEN.join(",") + "&temperature_unit=" + unit +
-      "&start_date=" + isoDag(begin) + "&end_date=" + isoDag(eind) +
+    const venster = "&start_date=" + isoDag(begin) + "&end_date=" + isoDag(eind) +
       "&timezone=" + encodeURIComponent(s.tz);
-    const prevP = fetch(prevUrl).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); });
-    const histUrl = "https://historical-forecast-api.open-meteo.com/v1/forecast" +
-      "?latitude=" + s.lat + "&longitude=" + s.lon +
-      "&daily=temperature_2m_max&models=" + KAL_MODELLEN.join(",") + "&temperature_unit=" + unit +
-      "&start_date=" + isoDag(begin) + "&end_date=" + isoDag(eind) +
-      "&timezone=" + encodeURIComponent(s.tz);
-    const histP = fetch(histUrl).then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .catch(function () { return null; });
+    const prevP = haalMetAifs("prev", function (modellen) {
+      return "https://previous-runs-api.open-meteo.com/v1/forecast" +
+        "?latitude=" + s.lat + "&longitude=" + s.lon +
+        "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2" +
+        "&models=" + modellen.join(",") + "&temperature_unit=" + unit + venster;
+    }, function (j, aifs) {
+      const r = (j.hourly || {})["temperature_2m_previous_day1_" + aifs];
+      return !!r && r.some(function (v) { return v !== null && v !== undefined; });
+    }).then(function (u) { return u.json; });
+    const histP = haalMetAifs("hist", function (modellen) {
+      return "https://historical-forecast-api.open-meteo.com/v1/forecast" +
+        "?latitude=" + s.lat + "&longitude=" + s.lon +
+        "&daily=temperature_2m_max&models=" + modellen.join(",") +
+        "&temperature_unit=" + unit + venster;
+    }, function (j, aifs) {
+      const r = (j.daily || {})["temperature_2m_max_" + aifs];
+      return !!r && r.some(function (v) { return v !== null && v !== undefined; });
+    }).then(function (u) { return u.json; }).catch(function () { return null; });
     const eindRuim = new Date(eind.getTime() + 86400000);
     const actP = zoekStation(s).then(function (st) {
       if (!st) return haalEra5Actuals(s, begin, eind).then(function (a) { return { act: a, bron: "ERA5 reanalyse", station: null }; });
@@ -855,36 +993,8 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         });
     });
     return Promise.all([prevP, actP, histP]).then(function (uit2) {
-      const pv = uit2[0], act = uit2[1].act, hv = uit2[2];
-      const tijden = (pv.hourly && pv.hourly.time) || [];
-      const fc = { 1: {}, 2: {} };
-      [1, 2].forEach(function (h) {
-        KAL_MODELLEN.forEach(function (m) {
-          const reeks = pv.hourly["temperature_2m_previous_day" + h + "_" + m];
-          if (!reeks) return;
-          const per = {};
-          for (let i = 0; i < tijden.length; i++) {
-            const v = reeks[i];
-            if (v === null || v === undefined) continue;
-            const dag = tijden[i].slice(0, 10);
-            (per[dag] = per[dag] || []).push(v);
-          }
-          for (const dag in per) {
-            if (per[dag].length >= 12) (fc[h][dag] = fc[h][dag] || {})[m] = Math.max.apply(null, per[dag]);
-          }
-        });
-      });
-      fc[0] = {};
-      if (hv && hv.daily && hv.daily.time) {
-        hv.daily.time.forEach(function (dag, i) {
-          const per = {};
-          KAL_MODELLEN.forEach(function (m) {
-            const reeks = hv.daily["temperature_2m_max_" + m];
-            if (reeks && reeks[i] !== null && reeks[i] !== undefined) per[m] = reeks[i];
-          });
-          if (Object.keys(per).length) fc[0][dag] = per;
-        });
-      }
+      const act = uit2[1].act;
+      const fc = { 0: histUit(uit2[2]), 1: prevUit(uit2[0], 1), 2: prevUit(uit2[0], 2) };
       const params = { gegenereerd: isoDag(new Date()), bron: uit2[1].bron };
       [0, 1, 2].forEach(function (h) {
         const dagenK = Object.keys(fc[h]).filter(function (d) { return act[d] !== undefined; }).sort();
@@ -892,7 +1002,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         const rec = dagenK.map(function (d) {
           return { o: Math.round(Date.parse(d + "T00:00:00Z") / 86400000), fc: fc[h][d], y: act[d] };
         });
-        const r = walkForwardJS(rec);
+        const r = walkForwardJS(rec, h + 1);
         if (r) params[String(h)] = r;
       });
       if (!params["1"]) throw new Error("te weinig data");
@@ -992,7 +1102,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     for (const k in UUR_BAK) delete UUR_BAK[k];
     return bundel(steden, function (groep) {
       return "https://api.open-meteo.com/v1/forecast" + coord(groep) +
-        "&hourly=temperature_2m&models=" + KAL_MODELLEN.join(",") +
+        "&hourly=temperature_2m&models=" + UUR_MODELLEN.join(",") +
         "&temperature_unit=" + eenheidVan(groep) +
         "&forecast_days=3&timezone=auto";
     }, UUR_BAK);
@@ -1077,7 +1187,8 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
           }
         }
       }
-      const pr = PARAMS.steden[s.key] || s.params || null;
+      // paramsVan: een verse herijking in de browser wint van het weekbestand
+      const pr = paramsVan(s);
       const dagen = [];
       datums.slice(0, 3).forEach(function (datum, i) {
         const modelGem = {};
@@ -1099,36 +1210,21 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         // horizonparameters: dag 0 leent de morgenparameters (kortere horizon, kleinere fout)
         const hp = pr ? (pr[String(i)] || pr["1"] || null) : null;
 
-        // gewogen modelgemiddelde over de gescoorde modellen
-        let muRuw = poolGem;
-        if (hp && hp.gewichten) {
-          let som = 0, W = 0;
-          for (const bm in hp.gewichten) {
-            const em = PARAM_NAAR_ENS[bm] || bm;
-            if (modelGem[em] !== undefined) {
-              som += hp.gewichten[bm] * modelGem[em];
-              W += hp.gewichten[bm];
-            }
-          }
-          if (W > 0.3) muRuw = som / W;
-        }
+        const kort = kortMap(modelGem);           // ensemblenamen -> korte namen
+        const muW = kernMu(hp, kort);             // gewogen modelgemiddelde
+        const muRuw = muW === null ? poolGem : muW;
 
         // spreiding tussen de modelsystemen: live onzekerheidsproxy
-        let sLive = null;
-        const mg = [];
-        for (const k2 in modelGem) mg.push(modelGem[k2]);
-        if (mg.length >= 2) {
-          const mm = mg.reduce(function (a2, b2) { return a2 + b2; }, 0) / mg.length;
-          sLive = Math.sqrt(mg.reduce(function (a2, b2) { return a2 + (b2 - mm) * (b2 - mm); }, 0) / mg.length);
-        }
+        const sLive = Object.keys(kort).length >= 2 ? kernSpreiding(kort) : null;
+        const lag = lagFout(s, i, lagDagenVan(hp, i));
 
-        // regressie, lagterm en gekalibreerde band
+        // correctiekern, lagterm en gekalibreerde band
         let verw = muRuw, lo = dLid10, hi = dLid90, gekalibreerd = false;
         let bLo = null, bHi = null;
         if (hp && (hp.qz10 !== undefined ||
                    (hp.res_q10 !== null && hp.res_q10 !== undefined))) {
-          verw = hp.a + hp.b * muRuw;
-          if (hp.g) verw += hp.g * lagFout(s, i);
+          const k = kernVoorspel(hp, kort, lag);
+          if (k !== null) verw = k;
           bLo = hp.res_q10; bHi = hp.res_q90;
           if (hp.qz10 !== undefined && hp.sig_c !== undefined) {
             const sp = (sLive !== null ? sLive : (hp.s_gem || 0));
@@ -1139,7 +1235,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
           gekalibreerd = true;
         }
         dagen.push({ datum: datum, verwachting: verw, p10: verw + lo, p90: verw + hi,
-                     mlx: { m: Object.assign({}, modelGem), s: sLive, lag: lagFout(s, i) },
+                     mlx: { m: Object.assign({}, modelGem), s: sLive, lag: lag },
                      n_leden: pool.length, gekalibreerd: gekalibreerd,
                      piek: (pieken && pieken[datum]) || null,
                      verbreed: gekalibreerd && (dLid10 < bLo || dLid90 > bHi) });
@@ -1216,39 +1312,183 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     return PARAMS.steden[s.key] || s.params || null;
   }
 
-  const LAGV = 2;   // fout van eergisteren is betrouwbaar bekend
-  function lagFout(s, h) {
+  const LAGV = 2;   // terugval: fout van eergisteren is betrouwbaar bekend
+  /* Op horizon h is de verste geverifieerde dag die van h+1 dagen voor de
+     doeldag: bij de run van vandaag is gisteren de laatste afgeronde dag. */
+  function lagDagenVan(hp, h) {
+    if (hp && hp.kern && hp.kern.lag_dagen) return hp.kern.lag_dagen;
+    if (hp && hp.lag_dagen) return hp.lag_dagen;
+    return LAGV;
+  }
+  /* De recentste geverifieerde fout in het venster [doel-lag, doel-lag-2],
+     hetzelfde venster als waarop de kalibratie is gefit. */
+  function lagFout(s, h, lagDagen) {
     const v2 = VERIF[s.key];
     if (!v2 || !v2.rijen) return 0;
-    const grens = isoInTz(s.tz, -4);
+    const doel = isoInTz(s.tz, h);
+    const boven = isoMin(doel, lagDagen);
+    const onder = isoMin(doel, lagDagen + 2);
     for (let i2 = 0; i2 < v2.rijen.length; i2++) {
       const r = v2.rijen[i2];
-      if (r.datum >= grens && r.per[h] !== undefined) return r.per[h];
+      if (r.datum <= boven && r.datum >= onder && r.per[h] !== undefined) return r.per[h];
     }
     return 0;
   }
 
-  /* pas de gekalibreerde wiskunde toe op een setje modelwaarden */
-  function voorspelUit(hp, modellen) {
-    if (!modellen) return null;
-    const namen = Object.keys(modellen);
+  /* ── kern:start ── gedeelde rekenkern, spiegelbeeld van bot/kalibratie.py.
+     Alles tussen deze twee bakens draait ook los in node (zie bot/test_kern.py),
+     zodat browser en backtest gegarandeerd hetzelfde uitrekenen. ── */
+
+  /* Los A x = b op met Gauss-eliminatie en partiele pivotering. */
+  function losOp(A, b) {
+    const k = b.length;
+    const M = A.map(function (rij, i) { return rij.slice().concat([b[i]]); });
+    for (let kol = 0; kol < k; kol++) {
+      let piv = kol;
+      for (let r = kol + 1; r < k; r++) if (Math.abs(M[r][kol]) > Math.abs(M[piv][kol])) piv = r;
+      if (Math.abs(M[piv][kol]) < 1e-12) return null;
+      const h = M[kol]; M[kol] = M[piv]; M[piv] = h;
+      const deler = M[kol][kol];
+      for (let j = kol; j <= k; j++) M[kol][j] /= deler;
+      for (let r = 0; r < k; r++) {
+        if (r !== kol && M[r][kol]) {
+          const f = M[r][kol];
+          for (let j = kol; j <= k; j++) M[r][j] -= f * M[kol][j];
+        }
+      }
+    }
+    return M.map(function (rij) { return rij[k]; });
+  }
+
+  /* Gewogen kleinste kwadraten met EWMA-vergeten en ridge-straf. De sommen
+     krimpen elke nieuwe dag met 0,5^(dagen/halfwaarde), dus de fit kost O(1)
+     per dag. Features gaan gestandaardiseerd de straf in, zodat alpha voor
+     elke feature hetzelfde betekent. */
+  function maakKern(k, half, alpha) {
+    const M = [], v = [];
+    for (let i = 0; i <= k; i++) { M.push(new Array(k + 1).fill(0)); v.push(0); }
+    let n = 0, dag = null;
+    function verval(d) {
+      if (dag !== null && d > dag) {
+        const f = Math.pow(0.5, (d - dag) / half);
+        for (let i = 0; i <= k; i++) { v[i] *= f; for (let j = 0; j <= k; j++) M[i][j] *= f; }
+      }
+      dag = d;
+    }
+    return {
+      voegToe: function (d, x, y) {
+        verval(d);
+        const z = [1].concat(x);
+        for (let i = 0; i <= k; i++) {
+          if (z[i]) for (let j = 0; j <= k; j++) M[i][j] += z[i] * z[j];
+          v[i] += z[i] * y;
+        }
+        n++;
+      },
+      coef: function () {
+        const Sw = M[0][0];
+        if (n < 10 || Sw <= 0) return null;
+        const m = [], vc = [], sd = [];
+        const ybar = v[0] / Sw;
+        for (let i = 0; i < k; i++) m.push(M[0][i + 1] / Sw);
+        const C = [];
+        for (let i = 0; i < k; i++) {
+          const rij = [];
+          for (let j = 0; j < k; j++) rij.push(M[i + 1][j + 1] - Sw * m[i] * m[j]);
+          C.push(rij);
+          vc.push(v[i + 1] - Sw * m[i] * ybar);
+        }
+        for (let i = 0; i < k; i++) sd.push(Math.sqrt(Math.max(C[i][i] / Sw, 1e-9)));
+        const A = [], rhs = [];
+        for (let i = 0; i < k; i++) {
+          const rij = [];
+          for (let j = 0; j < k; j++) rij.push(C[i][j] / (sd[i] * sd[j]) + (i === j ? alpha : 0));
+          A.push(rij);
+          rhs.push(vc[i] / sd[i]);
+        }
+        const opl = losOp(A, rhs);
+        if (!opl) return null;
+        const coef = opl.map(function (x, i) { return x / sd[i]; });
+        let a = ybar;
+        for (let i = 0; i < k; i++) a -= coef[i] * m[i];
+        return [a, coef];
+      },
+      voorspel: function (x) {
+        const c = this.coef();
+        if (!c) return 0;
+        let v2 = c[0];
+        for (let i = 0; i < k; i++) v2 += c[1][i] * x[i];
+        return v2;
+      }
+    };
+  }
+
+  /* De recentste restfout in het venster [o-lag, o-lag-2]. */
+  function kernLag(resid, o, lagDagen) {
+    for (let stap = lagDagen; stap <= lagDagen + 2; stap++) {
+      const r = resid[o - stap];
+      if (r !== undefined) return r;
+    }
+    return 0;
+  }
+
+  function kernSpreiding(kort) {
+    const v = [];
+    for (const m in kort) v.push(kort[m]);
+    if (v.length < 2) return 0;
+    let som = 0;
+    v.forEach(function (x) { som += x; });
+    const gem = som / v.length;
+    let q = 0;
+    v.forEach(function (x) { q += (x - gem) * (x - gem); });
+    return Math.sqrt(q / v.length);
+  }
+
+  /* Gewogen modelgemiddelde over de gescoorde modellen; valt terug op het
+     ongewogen gemiddelde als de gewichten te weinig modellen dekken. */
+  function kernMu(hp, kort) {
+    const namen = Object.keys(kort);
     if (!namen.length) return null;
-    let mu = null;
     if (hp && hp.gewichten) {
       let S = 0, W = 0;
-      namen.forEach(function (m) {
-        const g = hp.gewichten[m];
-        if (g) { S += g * modellen[m]; W += g; }
-      });
-      if (W > 0.3) mu = S / W;
+      for (const bm in hp.gewichten) {
+        const k = KORT_VAN[bm] || bm;
+        if (kort[k] !== undefined) { S += hp.gewichten[bm] * kort[k]; W += hp.gewichten[bm]; }
+      }
+      if (W > 0.3) return S / W;
     }
-    if (mu === null) {
-      let S = 0;
-      namen.forEach(function (m) { S += modellen[m]; });
-      mu = S / namen.length;
-    }
-    return (hp && hp.b !== undefined) ? hp.a + hp.b * mu : mu;
+    let S = 0;
+    namen.forEach(function (m) { S += kort[m]; });
+    return S / namen.length;
   }
+
+  function kernVector(mu, lag, spreiding, kort) {
+    const x = [mu, lag, spreiding || 0];
+    KERN_MODELLEN.forEach(function (m) {
+      x.push(kort[m] !== undefined ? kort[m] - mu : 0);
+    });
+    return x;
+  }
+
+  /* De gekalibreerde verwachting uit een setje modelwaarden (korte namen).
+     Met een kern-blok: mu + ridge over [mu, lagfout, spreiding, modelafwijkingen].
+     Zonder: de oude a + b*mu (+ g * lagfout), zodat oudere parameterbestanden
+     blijven werken. */
+  function kernVoorspel(hp, kort, lag) {
+    const mu = kernMu(hp, kort);
+    if (mu === null) return null;
+    if (hp && hp.kern && hp.kern.coef) {
+      const x = kernVector(mu, lag || 0, kernSpreiding(kort), kort);
+      let v = mu + hp.kern.intercept;
+      for (let i = 0; i < hp.kern.coef.length && i < x.length; i++) v += hp.kern.coef[i] * x[i];
+      return v;
+    }
+    if (hp && hp.b !== undefined) {
+      return hp.a + hp.b * mu + (hp.g ? hp.g * (lag || 0) : 0);
+    }
+    return mu;
+  }
+  /* ── kern:einde ── */
 
   function verifieerStad(s) {
     const eind = isoInTz(s.tz, -1);
@@ -1257,16 +1497,25 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     const tz = encodeURIComponent(s.tz);
 
     const prevP = PREV_BAK[s.key] ? Promise.resolve(PREV_BAK[s.key]) :
-      haalMetHerkansing("https://previous-runs-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
-        "&longitude=" + s.lon + "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2" +
-        "&models=" + KAL_MODELLEN.join(",") + "&temperature_unit=" + unit +
-        "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz);
+      haalMetAifs("prev", function (modellen) {
+        return "https://previous-runs-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
+          "&longitude=" + s.lon + "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2" +
+          "&models=" + modellen.join(",") + "&temperature_unit=" + unit +
+          "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz;
+      }, function (j, aifs) {
+        const r = (j.hourly || {})["temperature_2m_previous_day1_" + aifs];
+        return !!r && r.some(function (v) { return v !== null && v !== undefined; });
+      }).then(function (u) { return u.json; });
 
     const histP = HIST_BAK[s.key] ? Promise.resolve(HIST_BAK[s.key]) :
-      haalMetHerkansing("https://historical-forecast-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
-        "&longitude=" + s.lon + "&daily=temperature_2m_max&models=" + KAL_MODELLEN.join(",") +
-        "&temperature_unit=" + unit + "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz)
-        .catch(function () { return null; });
+      haalMetAifs("hist", function (modellen) {
+        return "https://historical-forecast-api.open-meteo.com/v1/forecast?latitude=" + s.lat +
+          "&longitude=" + s.lon + "&daily=temperature_2m_max&models=" + modellen.join(",") +
+          "&temperature_unit=" + unit + "&start_date=" + begin + "&end_date=" + eind + "&timezone=" + tz;
+      }, function (j, aifs) {
+        const r = (j.daily || {})["temperature_2m_max_" + aifs];
+        return !!r && r.some(function (v) { return v !== null && v !== undefined; });
+      }).then(function (u) { return u.json; }).catch(function () { return null; });
 
     const st = metarVan(s);
     const actP = (st
@@ -1283,34 +1532,8 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
           .then(function (a) { return { act: a, bron: "ERA5" }; }));
 
     return Promise.all([prevP, histP, actP]).then(function (u) {
-      const pv = u[0], hv = u[1], act = u[2].act;
-      const fc = { 0: {}, 1: {}, 2: {} };
-      const T = (pv.hourly && pv.hourly.time) || [];
-      [1, 2].forEach(function (h) {
-        KAL_MODELLEN.forEach(function (m) {
-          const reeks = pv.hourly["temperature_2m_previous_day" + h + "_" + m];
-          if (!reeks) return;
-          const per = {};
-          for (let i = 0; i < T.length; i++) {
-            const val = reeks[i];
-            if (val === null || val === undefined) continue;
-            (per[T[i].slice(0, 10)] = per[T[i].slice(0, 10)] || []).push(val);
-          }
-          for (const dag in per) {
-            if (per[dag].length >= 12) (fc[h][dag] = fc[h][dag] || {})[m] = Math.max.apply(null, per[dag]);
-          }
-        });
-      });
-      if (hv && hv.daily && hv.daily.time) {
-        hv.daily.time.forEach(function (dag, i) {
-          KAL_MODELLEN.forEach(function (m) {
-            const reeks = hv.daily["temperature_2m_max_" + m];
-            if (reeks && reeks[i] !== null && reeks[i] !== undefined) {
-              (fc[0][dag] = fc[0][dag] || {})[m] = reeks[i];
-            }
-          });
-        });
-      }
+      const act = u[2].act;
+      const fc = { 0: histUit(u[1]), 1: prevUit(u[0], 1), 2: prevUit(u[0], 2) };
 
       const pr = paramsVan(s);
       const dagen = Object.keys(act).sort().slice(-VERIF_VENSTER);
@@ -1320,15 +1543,16 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         const per = {};
         [0, 1, 2].forEach(function (h) {
           const hp = pr ? (pr[String(h)] || pr["1"]) : null;
-          let p = voorspelUit(hp, fc[h][dag]);
-          if (p === null) return;
-          if (hp && hp.g) {
-            const grens = isoMin(dag, LAGV);
-            const kk = ketting[h];
-            for (let i2 = kk.length - 1; i2 >= 0; i2--) {
-              if (kk[i2][0] <= grens) { p += hp.g * kk[i2][1]; break; }
-            }
+          if (!fc[h][dag]) return;
+          const lagD = lagDagenVan(hp, h);
+          const boven = isoMin(dag, lagD), onder = isoMin(dag, lagD + 2);
+          let lag = 0;
+          const kk = ketting[h];
+          for (let i2 = kk.length - 1; i2 >= 0; i2--) {
+            if (kk[i2][0] <= boven) { if (kk[i2][0] >= onder) lag = kk[i2][1]; break; }
           }
+          const p = kernVoorspel(hp, fc[h][dag], lag);
+          if (p === null) return;
           const f = Math.round((act[dag] - p) * 10) / 10;
           per[h] = f;
           ketting[h].push([dag, f]);
@@ -1391,12 +1615,12 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       bundel(teDoen, function (groep) {
         return "https://previous-runs-api.open-meteo.com/v1/forecast" + coord(groep) +
           "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2&models=" +
-          KAL_MODELLEN.join(",") + "&temperature_unit=" + eenheidVan(groep) +
+          kalModellen("prev").join(",") + "&temperature_unit=" + eenheidVan(groep) +
           "&start_date=" + beginD + "&end_date=" + eindD + "&timezone=auto";
       }, PREV_BAK),
       bundel(teDoen, function (groep) {
         return "https://historical-forecast-api.open-meteo.com/v1/forecast" + coord(groep) +
-          "&daily=temperature_2m_max&models=" + KAL_MODELLEN.join(",") +
+          "&daily=temperature_2m_max&models=" + kalModellen("hist").join(",") +
           "&temperature_unit=" + eenheidVan(groep) +
           "&start_date=" + beginD + "&end_date=" + eindD + "&timezone=auto";
       }, HIST_BAK),
@@ -1493,10 +1717,23 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
           .map(function (m) { return (MODEL_NAAM[m] || m) + " " + Math.round(h1.gewichten[m] * 100) + "%"; });
         det += '<div class="detail-regel">gewichten <span class="w">' + delen.join(" \u00B7 ") + "</span></div>";
       }
-      det += '<div class="detail-regel">regressie <span class="w">a ' + metTeken(h1.a) +
-             " \u00B7 b " + nl(h1.b, 2) +
-             (h1.g ? " \u00B7 lag g " + nl(h1.g, 2) : "") +
-             "</span> \u00B7 EWMA " + PARAMS.halfwaarde_dagen + "d</div>";
+      if (h1.kern && h1.kern.coef) {
+        const f = h1.kern.features || KERN_FEATURES;
+        const cf = function (naam) {
+          const i = f.indexOf(naam);
+          return i >= 0 ? h1.kern.coef[i] : 0;
+        };
+        det += '<div class="detail-regel">kern <span class="w">a ' + metTeken(h1.kern.intercept) +
+               " \u00B7 b " + nl(1 + cf("mu"), 2) +
+               " \u00B7 lag " + nl(cf("lag"), 2) +
+               " \u00B7 spreiding " + nl(cf("spreiding"), 2) +
+               "</span> \u00B7 plus de afwijking per model \u00B7 EWMA " + KAL.halfKern + "d</div>";
+      } else {
+        det += '<div class="detail-regel">regressie <span class="w">a ' + metTeken(h1.a) +
+               " \u00B7 b " + nl(h1.b, 2) +
+               (h1.g ? " \u00B7 lag g " + nl(h1.g, 2) : "") +
+               "</span> \u00B7 EWMA " + PARAMS.halfwaarde_dagen + "d</div>";
+      }
       let b10 = h1.res_q10, b90 = h1.res_q90, bandNoot = "";
       if (h1.qz10 !== undefined && h1.sig_c !== undefined) {
         const sigT = Math.max(0.2, h1.sig_c + h1.sig_d * (h1.s_gem || 0));
@@ -2258,7 +2495,9 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
   });
 
   document.getElementById("voet").innerHTML =
-    "Verwachting: skillgewogen modelgemiddelde met regressiecorrectie (EWMA halfwaardetijd " + PARAMS.halfwaarde_dagen + " dagen).<br>" +
+    "Verwachting: skillgewogen modelgemiddelde (EWMA halfwaardetijd " + PARAMS.halfwaarde_dagen +
+    " dagen) met een lerende correctie op de laatste geverifieerde fout, de modelspreiding " +
+    "en de afwijking van elk model afzonderlijk.<br>" +
     "80% band: gekalibreerde walk forward restfoutkwantielen, verbreed als de leden verder uiteenlopen dan normaal.<br>" +
     "De app controleert elke dag zelf de laatste 4 dagen na tegen de stationsmeting; zie model en controles per stad.<br>" +
     "Modellen: ECMWF IFS + AIFS, NCEP GEFS, ICON, GEM via Open\u2011Meteo \u00B7 gescoord tegen METAR stationswaarnemingen.";

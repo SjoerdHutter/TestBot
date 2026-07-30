@@ -7,14 +7,20 @@ previous runs API van Open-Meteo, verifieert tegen de METAR waarnemingen en
 leert daaruit per stad:
 
   1. modelgewichten op basis van recente skill (EWMA, halfwaardetijd 14 dagen)
-  2. een regressiecorrectie actual = a + b * modelgemiddelde, met de
-     richtingscoefficient b gekrompen richting 1 bij weinig data
+  2. de correctiekern: een gewogen ridge met vergeten die uit het gewogen
+     modelgemiddelde, de recentste geverifieerde fout, de spreiding tussen de
+     modellen en de afwijking van elk afzonderlijk model de verwachting maakt
   3. gekalibreerde onzekerheidsbanden uit de empirische kwantielen van de
      walk forward restfouten, zodat het 80% interval ook echt 80% dekt
 
+De oude correctie (actual = a + b * modelgemiddelde, plus g maal de laatste
+fout) loopt er als controle naast. Per stad en horizon gaat alleen de kern mee
+naar de app als hij op het evaluatievenster ook echt beter is; zo niet, dan
+blijven de oude parameters staan.
+
 Alles wordt walk forward gevalideerd: elke dag wordt voorspeld met uitsluitend
-kennis van voor die dag. Het rapport vergelijkt de oude methode (vaste offset
-op het ongewogen modelgemiddelde) met de nieuwe.
+kennis van voor die dag. Op horizon h is de verste bekende geverifieerde fout
+die van h+1 dagen voor de doeldag, en daar wordt ook op gefit.
 
 Uitvoer: app_params.js en app_params.json voor de app, plus een rapport.
 
@@ -32,13 +38,39 @@ from pathlib import Path
 
 import weer  # STEDEN, fetch_station_maxen, c_van_f, _get_json, nl
 
-MODELLEN = ["ecmwf_ifs025", "ecmwf_aifs025", "gfs_seamless", "icon_seamless", "gem_seamless"]
-OUDE_MODELLEN = ["ecmwf_ifs025", "gfs_seamless", "icon_seamless"]  # het oude drietal
-HALFWAARDE = 14.0      # dagen, voor de EWMA weging
+# De API-namen verschillen per endpoint (de ensemble-API kent ecmwf_aifs025,
+# de deterministische APIs ecmwf_aifs025_single). Intern werkt alles daarom met
+# korte namen; KORT_VAN vertaalt elke variant die we tegenkomen.
+KORT_VAN = {
+    "ecmwf_ifs025": "ifs",
+    "ecmwf_aifs025": "aifs", "ecmwf_aifs025_single": "aifs",
+    "gfs_seamless": "gfs", "ncep_gefs025": "gfs",
+    "icon_seamless": "icon",
+    "gem_seamless": "gem", "gem_global": "gem",
+}
+MODELLEN = ["ifs", "aifs", "gfs", "icon", "gem"]
+# Wat er bij de deterministische APIs (previous-runs, historical-forecast) wordt
+# opgevraagd. AIFS heet daar ecmwf_aifs025_single; onder de naam ecmwf_aifs025
+# kwam er nooit een reeks terug, waardoor AIFS jarenlang buiten de weging viel.
+API_MODELLEN = ["ecmwf_ifs025", "ecmwf_aifs025_single", "gfs_seamless",
+                "icon_seamless", "gem_seamless"]
+AIFS_ALTERNATIEF = "ecmwf_aifs025"   # terugval als _single niets oplevert
+HALFWAARDE = 14.0      # dagen, voor de EWMA weging van de modelgewichten
 KRIMP_N = 30.0         # hoe sterk b richting 1 wordt getrokken bij weinig data
 BURN_GEWICHT = 10      # minimaal aantal dagen voor er modelgewichten zijn
 BURN_REGRESSIE = 30    # minimaal aantal dagen voor de regressie meedoet
 BURN_EVALUATIE = 60    # evaluatie start hier zodat er restfoutkwantielen zijn
+
+# ── De correctiekern ──────────────────────────────────────────────────────────
+# De oude correctie was actual = a + b * modelgemiddelde (+ g * lagfout). De kern
+# generaliseert dat naar een gewogen ridge over meer voorspellers die live ook
+# beschikbaar zijn: het gewogen gemiddelde zelf, de recentste geverifieerde fout,
+# de spreiding tussen de modelsystemen en per model de afwijking van het
+# gemiddelde. Die laatste groep laat het model leren dat bijvoorbeeld "ICON
+# hoger dan de rest" iets anders betekent dan "IFS hoger dan de rest".
+KERN_FEATURES = ["mu", "lag", "spreiding"] + ["d_" + m for m in MODELLEN]
+HALFWAARDE_KERN = 60.0   # tragere vergeetsnelheid: meer coefficienten om te schatten
+ALPHA_KERN = 30.0        # ridge-straf op gestandaardiseerde features
 
 
 # ── Ophalen ───────────────────────────────────────────────────────────────────
@@ -54,24 +86,69 @@ def uitvoermap() -> Path:
     return hier
 
 
+_AIFS_NAAM: dict = {}   # endpoint -> de AIFS-naam die daar data oplevert
+
+
+def modelnamen(aifs: str) -> list:
+    """API_MODELLEN met deze naam voor AIFS."""
+    return [aifs if KORT_VAN.get(m) == "aifs" else m for m in API_MODELLEN]
+
+
+def _haal_met_aifs(soort: str, bouw_url, heeft_aifs):
+    """Haalt op met de voorkeursnaam voor AIFS en probeert eenmalig de andere
+    naam als die geen reeks oplevert (een onbekende modelnaam geeft bovendien
+    een 400). De winnende naam wordt onthouden, dus per endpoint is er hooguit
+    een extra aanroep. Geeft (json, gebruikte aifs-naam)."""
+    if soort in _AIFS_NAAM:
+        naam = _AIFS_NAAM[soort]
+        return weer._get_json(bouw_url(modelnamen(naam)), timeout=90), naam
+
+    reserve = None
+    laatste_fout = None
+    for naam in (API_MODELLEN[1], AIFS_ALTERNATIEF):
+        try:
+            data = weer._get_json(bouw_url(modelnamen(naam)), timeout=90)
+        except Exception as ex:
+            laatste_fout = ex
+            continue
+        if heeft_aifs(data, naam):
+            _AIFS_NAAM[soort] = naam
+            return data, naam
+        if reserve is None:
+            reserve = (data, naam)
+    if reserve is None:
+        raise laatste_fout if laatste_fout else RuntimeError("geen antwoord")
+    # Geen van beide namen leverde AIFS: verder zoeken heeft geen zin.
+    _AIFS_NAAM[soort] = reserve[1]
+    print("      [let op] geen AIFS-reeks van deze API, verder met vier modellen")
+    return reserve
+
+
 def haal_previous_runs(stad: dict, d1: date, d2: date) -> dict:
-    """{(horizon, datum): {model: dagmax}} uit de previous runs API."""
+    """{(horizon, datum): {kort model: dagmax}} uit de previous runs API."""
     eenheid = "fahrenheit" if stad["eenheid"] == "F" else "celsius"
-    url = (
-        "https://previous-runs-api.open-meteo.com/v1/forecast"
-        f"?latitude={stad['lat']}&longitude={stad['lon']}"
-        "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2"
-        f"&models={','.join(MODELLEN)}"
-        f"&temperature_unit={eenheid}"
-        f"&start_date={d1.isoformat()}&end_date={d2.isoformat()}"
-        f"&timezone={urllib.parse.quote(stad['tz'])}"
-    )
-    data = weer._get_json(url, timeout=90)
+
+    def bouw(modellen):
+        return (
+            "https://previous-runs-api.open-meteo.com/v1/forecast"
+            f"?latitude={stad['lat']}&longitude={stad['lon']}"
+            "&hourly=temperature_2m_previous_day1,temperature_2m_previous_day2"
+            f"&models={','.join(modellen)}"
+            f"&temperature_unit={eenheid}"
+            f"&start_date={d1.isoformat()}&end_date={d2.isoformat()}"
+            f"&timezone={urllib.parse.quote(stad['tz'])}"
+        )
+
+    def heeft_aifs(data, naam):
+        reeks = (data.get("hourly") or {}).get(f"temperature_2m_previous_day1_{naam}")
+        return bool(reeks) and any(v is not None for v in reeks)
+
+    data, aifs = _haal_met_aifs("prev", bouw, heeft_aifs)
     hourly = data["hourly"]
     tijden = hourly["time"]
     uit: dict = {}
     for h in (1, 2):
-        for m in MODELLEN:
+        for m in modelnamen(aifs):
             reeks = hourly.get(f"temperature_2m_previous_day{h}_{m}")
             if not reeks:
                 continue
@@ -82,7 +159,7 @@ def haal_previous_runs(stad: dict, d1: date, d2: date) -> dict:
                 per_dag.setdefault(t[:10], []).append(v)
             for dag, waarden in per_dag.items():
                 if len(waarden) >= 12:
-                    uit.setdefault((h, dag), {})[m] = max(waarden)
+                    uit.setdefault((h, dag), {})[KORT_VAN[m]] = max(waarden)
     return uit
 
 
@@ -92,24 +169,31 @@ def haal_hist_forecast(stad: dict, d1: date, d2: date) -> dict:
     de structurele modelafwijking blijft staan (Los Angeles dag 0 nog -3,6 van de
     -4,1 op dag 1), dus dit is een echte voorspelling en niet de analyse."""
     eenheid = "fahrenheit" if stad["eenheid"] == "F" else "celsius"
-    url = (
-        "https://historical-forecast-api.open-meteo.com/v1/forecast"
-        f"?latitude={stad['lat']}&longitude={stad['lon']}"
-        "&daily=temperature_2m_max"
-        f"&models={','.join(MODELLEN)}"
-        f"&temperature_unit={eenheid}"
-        f"&start_date={d1.isoformat()}&end_date={d2.isoformat()}"
-        f"&timezone={urllib.parse.quote(stad['tz'])}"
-    )
-    data = weer._get_json(url, timeout=90)
+
+    def bouw(modellen):
+        return (
+            "https://historical-forecast-api.open-meteo.com/v1/forecast"
+            f"?latitude={stad['lat']}&longitude={stad['lon']}"
+            "&daily=temperature_2m_max"
+            f"&models={','.join(modellen)}"
+            f"&temperature_unit={eenheid}"
+            f"&start_date={d1.isoformat()}&end_date={d2.isoformat()}"
+            f"&timezone={urllib.parse.quote(stad['tz'])}"
+        )
+
+    def heeft_aifs(data, naam):
+        reeks = (data.get("daily") or {}).get(f"temperature_2m_max_{naam}")
+        return bool(reeks) and any(v is not None for v in reeks)
+
+    data, aifs = _haal_met_aifs("hist", bouw, heeft_aifs)
     daily = data.get("daily", {})
     uit: dict = {}
     for i, dag in enumerate(daily.get("time", [])):
         per = {}
-        for m in MODELLEN:
+        for m in modelnamen(aifs):
             reeks = daily.get(f"temperature_2m_max_{m}")
             if reeks and i < len(reeks) and reeks[i] is not None:
-                per[m] = reeks[i]
+                per[KORT_VAN[m]] = reeks[i]
         if per:
             uit[dag] = per
     return uit
@@ -242,13 +326,17 @@ def laad_log(pad: Path) -> list:
 
 def records_uit_enslog(rijen: list, act: dict, key: str, h: int) -> list:
     """Records op basis van de dagelijkse ensemblelog: {model: ledengemiddelde}.
-    Laatste logregel per (doeldatum, model) wint."""
+    Laatste logregel per (doeldatum, model) wint. De log gebruikt de namen van de
+    ensemble-API, die hier naar dezelfde korte namen gaan als de backtest."""
     per: dict = {}
     for r in rijen:
         if r.get("key") != key or r.get("lead") != str(h):
             continue
+        kort = KORT_VAN.get(r.get("model", ""))
+        if not kort:
+            continue
         try:
-            per.setdefault(r["doel_datum"], {})[r["model"]] = float(r["gemiddelde"])
+            per.setdefault(r["doel_datum"], {})[kort] = float(r["gemiddelde"])
         except (KeyError, ValueError):
             continue
     uit = []
@@ -343,33 +431,230 @@ def crps_ensemble(restfouten_paren, y_min_yhat: float) -> float:
     return t1 - t2
 
 
-# ── Walk forward per stad en horizon ──────────────────────────────────────────
+# ── De correctiekern: gewogen ridge met vergeten ──────────────────────────────
 
-LAG_DAGEN = 2      # fout van eergisteren is live betrouwbaar bekend
+LAG_DAGEN = 2      # standaard; per horizon h is de verse fout die van h+1 dagen
 KRIMP_G = 40.0     # krimp van de lagcoefficient richting 0
 
 
-def walk_forward(records: list) -> dict:
-    """Volledig walk forward: gewichten, regressie, lagterm en spreidingsband
-    gebruiken per dag uitsluitend kennis van daarvoor."""
-    from statistics import pstdev
+def los_op(A: list, b: list):
+    """Los A x = b op met Gauss-eliminatie en partiele pivotering.
+    Geeft None als het stelsel singulier is."""
+    k = len(b)
+    M = [rij[:] + [b[i]] for i, rij in enumerate(A)]
+    for kol in range(k):
+        piv = max(range(kol, k), key=lambda r: abs(M[r][kol]))
+        if abs(M[piv][kol]) < 1e-12:
+            return None
+        M[kol], M[piv] = M[piv], M[kol]
+        deler = M[kol][kol]
+        for j in range(kol, k + 1):
+            M[kol][j] /= deler
+        for r in range(k):
+            if r != kol and M[r][kol]:
+                f = M[r][kol]
+                for j in range(kol, k + 1):
+                    M[r][j] -= f * M[kol][j]
+    return [M[i][k] for i in range(k)]
 
+
+class OnlineRidge:
+    """Gewogen kleinste kwadraten met EWMA-vergeten en een ridge-straf.
+
+    De sommen worden recursief bijgewerkt (elke nieuwe dag laat het verleden met
+    0,5^(dagen/halfwaarde) krimpen), dus de fit is O(1) per dag. Features worden
+    intern gestandaardiseerd zodat alpha voor elke feature hetzelfde betekent:
+    een coefficient wordt met factor Sw/(Sw+alpha) naar nul getrokken, precies
+    zoals de oude krimp van b richting 1."""
+
+    def __init__(self, k: int, half: float, alpha: float):
+        self.k = k
+        self.half = half
+        self.alpha = alpha
+        self.M = [[0.0] * (k + 1) for _ in range(k + 1)]   # [1, x] x [1, x]
+        self.v = [0.0] * (k + 1)                           # [1, x] * y
+        self.n = 0
+        self.dag = None
+
+    def _verval(self, dag):
+        if self.dag is not None and dag > self.dag:
+            f = 0.5 ** ((dag - self.dag) / self.half)
+            for i in range(self.k + 1):
+                self.v[i] *= f
+                rij = self.M[i]
+                for j in range(self.k + 1):
+                    rij[j] *= f
+        self.dag = dag
+
+    def voeg_toe(self, dag, x, y):
+        self._verval(dag)
+        z = [1.0] + list(x)
+        for i in range(self.k + 1):
+            zi = z[i]
+            if zi:
+                rij = self.M[i]
+                for j in range(self.k + 1):
+                    rij[j] += zi * z[j]
+            self.v[i] += zi * y
+        self.n += 1
+
+    def coef(self):
+        """(intercept, coefficienten) in ruwe eenheden, of None."""
+        Sw = self.M[0][0]
+        if self.n < 10 or Sw <= 0:
+            return None
+        k = self.k
+        m = [self.M[0][j + 1] / Sw for j in range(k)]
+        ybar = self.v[0] / Sw
+        C = [[self.M[i + 1][j + 1] - Sw * m[i] * m[j] for j in range(k)] for i in range(k)]
+        vc = [self.v[i + 1] - Sw * m[i] * ybar for i in range(k)]
+        sd = [math.sqrt(max(C[i][i] / Sw, 1e-9)) for i in range(k)]
+        A = [[C[i][j] / (sd[i] * sd[j]) + (self.alpha if i == j else 0.0)
+              for j in range(k)] for i in range(k)]
+        opl = los_op(A, [vc[i] / sd[i] for i in range(k)])
+        if opl is None:
+            return None
+        coef = [opl[i] / sd[i] for i in range(k)]
+        return ybar - sum(coef[i] * m[i] for i in range(k)), coef
+
+    def voorspel(self, x) -> float:
+        c = self.coef()
+        if c is None:
+            return 0.0
+        a, coef = c
+        return a + sum(coef[i] * x[i] for i in range(self.k))
+
+
+def lag_van(resid: dict, o: int, lag_dagen: int) -> float:
+    """De verste nog verse restfout: de recentste dag in het venster
+    [o-lag_dagen, o-lag_dagen-2]. Nul als er niets bekend is."""
+    for stap in range(lag_dagen, lag_dagen + 3):
+        r = resid.get(o - stap)
+        if r is not None:
+            return r
+    return 0.0
+
+
+def pstdev_van(fc: dict):
+    """Spreiding tussen de modelwaarden van een dag, of None bij minder dan twee."""
+    from statistics import pstdev
+    vals = list(fc.values())
+    return pstdev(vals) if len(vals) >= 2 else None
+
+
+def kern_vector(mu: float, lag: float, spreiding, fc: dict) -> list:
+    """De featurevector van de kern, in de volgorde van KERN_FEATURES.
+    Een ontbrekend model levert afwijking nul: dat model telt dan niet mee."""
+    x = [mu, lag, spreiding if spreiding is not None else 0.0]
+    for m in MODELLEN:
+        x.append(fc[m] - mu if m in fc else 0.0)
+    return x
+
+
+# ── Walk forward per stad en horizon ──────────────────────────────────────────
+
+def _banden(records: list, rez: list, spreid: list) -> dict:
+    """Walk forward de onzekerheidsbanden bij een gegeven reeks restfouten.
+    Elke dag gebruikt uitsluitend restfouten van daarvoor."""
+    n = len(records)
+    sigma = [None] * n
+    crps_o, crps_n, dek_o, dek_n, br_o, br_n = [], [], [], [], [], []
+
+    def sig_fit(t, ref):
+        paren = [(ewma_gewicht(ref - records[s][0]), spreid[s], abs(rez[s]))
+                 for s in range(t) if rez[s] is not None and spreid[s] is not None]
+        if len(paren) < 20:
+            return None, None
+        xw = gewogen_gem([(w, x) for w, x, _ in paren])
+        yw = gewogen_gem([(w, y) for w, _, y in paren])
+        sxx = sum(w * (x - xw) ** 2 for w, x, _ in paren)
+        sxy = sum(w * (x - xw) * (y - yw) for w, x, y in paren)
+        d = max(0.0, sxy / sxx) if sxx > 0.05 else 0.0
+        return max(0.1, yw - d * xw), d
+
+    for t in range(n):
+        d_t = records[t][0]
+        c, d = sig_fit(t, d_t)
+        if c is not None:
+            sp = spreid[t]
+            if sp is None:
+                sps = [x for x in spreid[:t] if x is not None]
+                sp = sum(sps) / len(sps) if sps else 0.0
+            sigma[t] = max(0.2, c + d * sp)
+
+        if t < BURN_EVALUATIE or rez[t] is None:
+            continue
+        fout = rez[t]
+        klaar = [(records[s][0], rez[s]) for s in range(t) if rez[s] is not None]
+        if len(klaar) < 20:
+            continue
+        paren = [(ewma_gewicht(d_t - o), r) for o, r in klaar]
+        q10 = gewogen_kwantiel(paren, 0.10)
+        q90 = gewogen_kwantiel(paren, 0.90)
+        dek_o.append((q10, q90, fout)); br_o.append(q90 - q10)
+        crps_o.append(crps_ensemble(paren, fout))
+        if sigma[t] is not None:
+            zp = [(ewma_gewicht(d_t - records[s][0]), rez[s] / sigma[s])
+                  for s in range(t) if rez[s] is not None and sigma[s]]
+            if len(zp) >= 20:
+                z10 = gewogen_kwantiel(zp, 0.10)
+                z90 = gewogen_kwantiel(zp, 0.90)
+                dek_n.append((z10 * sigma[t], z90 * sigma[t], fout))
+                br_n.append((z90 - z10) * sigma[t])
+                crps_n.append(crps_ensemble([(w2, zz * sigma[t]) for w2, zz in zp], fout))
+
+    ref = records[-1][0] + 1
+    klaar = [(records[s][0], rez[s], sigma[s]) for s in range(n) if rez[s] is not None]
+    paren_r = [(ewma_gewicht(ref - o), r) for o, r, _ in klaar]
+    q10 = gewogen_kwantiel(paren_r, 0.10) if len(paren_r) >= 20 else None
+    q90 = gewogen_kwantiel(paren_r, 0.90) if len(paren_r) >= 20 else None
+    zp = [(ewma_gewicht(ref - o), r / sg) for o, r, sg in klaar if sg]
+    c_e, d_e = sig_fit(n, ref)
+    sps = [(ewma_gewicht(ref - records[s][0]), spreid[s])
+           for s in range(n) if spreid[s] is not None]
+    uit = {
+        "res_q10": None if q10 is None else round(q10, 2),
+        "res_q90": None if q90 is None else round(q90, 2),
+        "crps_oud": round(sum(crps_o) / len(crps_o), 2) if crps_o else None,
+        "crps": round(sum(crps_n) / len(crps_n), 2) if crps_n else None,
+        "dekkingsreeks": dek_o, "dekkingsreeks_s": dek_n,
+        "breedte_o": br_o, "breedte_s": br_n,
+    }
+    if len(zp) >= 20 and c_e is not None:
+        uit["sig_c"] = round(c_e, 3); uit["sig_d"] = round(d_e, 3)
+        uit["qz10"] = round(gewogen_kwantiel(zp, 0.10), 3)
+        uit["qz90"] = round(gewogen_kwantiel(zp, 0.90), 3)
+        uit["s_gem"] = round(gewogen_gem(sps), 2) if sps else None
+    return uit
+
+
+def walk_forward(records: list, lag_dagen: int = LAG_DAGEN) -> dict:
+    """Volledig walk forward: gewichten, correctie, lagterm en band gebruiken per
+    dag uitsluitend kennis van daarvoor.
+
+    Er lopen twee correcties naast elkaar: de oude (a + b*mu, plus g maal de
+    laatste fout) en de kern (ridge over mu, lagfout, spreiding en de afwijking
+    van elk model). De kern wint alleen als hij over het evaluatievenster ook
+    echt beter is; anders blijft de oude staan. De band wordt gemaakt van de
+    restfouten van de winnaar."""
     n = len(records)
     mu_raw = [None] * n
     spreid = [None] * n     # spreiding tussen de modellen: onzekerheidsproxy
     yhat_b = [None] * n     # a + b*mu
     yhat_n = [None] * n     # plus g * recente fout
+    yhat_k = [None] * n     # de kern
     rb = [None] * n
     rn = [None] * n
-    sigma = [None] * n      # verwachte |fout| die dag: c + d*spreiding
-    fouten_b, fouten_n, crps_o, crps_n = [], [], [], []
-    dek_o, dek_n, br_o, br_n = [], [], [], []
+    rk = [None] * n
+    fouten_b, fouten_n, fouten_k = [], [], []
     yhat_per_dag = {}
     laatste = {"gew": None, "ab": (0.0, 1.0)}
+    kern = OnlineRidge(len(KERN_FEATURES), HALFWAARDE_KERN, ALPHA_KERN)
+    resid_kern: dict = {}   # ordinaal -> restfout van de kern
 
     def lag_index(t):
         for s in range(t - 1, -1, -1):
-            if records[s][0] <= records[t][0] - LAG_DAGEN and rn[s] is not None:
+            if records[s][0] <= records[t][0] - lag_dagen and rn[s] is not None:
                 return s
         return None
 
@@ -387,18 +672,6 @@ def walk_forward(records: list) -> dict:
         g = sum(w * x * y for w, x, y in paren) / sxx
         ne = n_eff([w for w, _, _ in paren])
         return min(0.5, max(0.0, g * ne / (ne + KRIMP_G)))
-
-    def sig_fit(t, ref):
-        paren = [(ewma_gewicht(ref - records[s][0]), spreid[s], abs(rn[s]))
-                 for s in range(t) if rn[s] is not None and spreid[s] is not None]
-        if len(paren) < 20:
-            return None, None
-        xw = gewogen_gem([(w, x) for w, x, _ in paren])
-        yw = gewogen_gem([(w, y) for w, _, y in paren])
-        sxx = sum(w * (x - xw) ** 2 for w, x, _ in paren)
-        sxy = sum(w * (x - xw) * (y - yw) for w, x, y in paren)
-        d = max(0.0, sxy / sxx) if sxx > 0.05 else 0.0
-        return max(0.1, yw - d * xw), d
 
     for t in range(n):
         d_t, fc_t, y_t = records[t]
@@ -421,8 +694,7 @@ def walk_forward(records: list) -> dict:
         mu_raw[t] = sum(g_[m] * fc_t[m] for m in fc_t) / W
         if gewichten:
             laatste["gew"] = gewichten
-        vals = list(fc_t.values())
-        spreid[t] = pstdev(vals) if len(vals) >= 2 else None
+        spreid[t] = pstdev_van(fc_t)
 
         if t >= BURN_REGRESSIE:
             paren = [(ewma_gewicht(d_t - records[s][0]), mu_raw[s], records[s][2])
@@ -443,51 +715,32 @@ def walk_forward(records: list) -> dict:
         li = lag_index(t)
         yhat_n[t] = yhat_b[t] + g * (rn[li] if li is not None else 0.0)
 
-        c, d = sig_fit(t, d_t)
-        if c is not None:
-            sp = spreid[t]
-            if sp is None:
-                sps = [x for x in spreid[:t] if x is not None]
-                sp = sum(sps) / len(sps) if sps else 0.0
-            sigma[t] = max(0.2, c + d * sp)
+        x_t = kern_vector(mu_raw[t], lag_van(resid_kern, d_t, lag_dagen),
+                          spreid[t], fc_t)
+        yhat_k[t] = mu_raw[t] + kern.voorspel(x_t)
 
         if t >= BURN_EVALUATIE:
             fouten_b.append(abs(y_t - yhat_b[t]))
             fouten_n.append(abs(y_t - yhat_n[t]))
-            fout = y_t - yhat_n[t]
-            klaar = [(records[s][0], rn[s]) for s in range(t) if rn[s] is not None]
-            if len(klaar) >= 20:
-                paren = [(ewma_gewicht(d_t - o), r) for o, r in klaar]
-                q10 = gewogen_kwantiel(paren, 0.10)
-                q90 = gewogen_kwantiel(paren, 0.90)
-                dek_o.append((q10, q90, fout)); br_o.append(q90 - q10)
-                crps_o.append(crps_ensemble(paren, fout))
-                if sigma[t] is not None:
-                    zp = [(ewma_gewicht(d_t - records[s][0]), rn[s] / sigma[s])
-                          for s in range(t) if rn[s] is not None and sigma[s]]
-                    if len(zp) >= 20:
-                        z10 = gewogen_kwantiel(zp, 0.10)
-                        z90 = gewogen_kwantiel(zp, 0.90)
-                        dek_n.append((z10 * sigma[t], z90 * sigma[t], fout))
-                        br_n.append((z90 - z10) * sigma[t])
-                        crps_n.append(crps_ensemble([(w2, zz * sigma[t]) for w2, zz in zp], fout))
+            fouten_k.append(abs(y_t - yhat_k[t]))
             yhat_per_dag[d_t] = yhat_n[t]
 
+        resid_kern[d_t] = y_t - yhat_k[t]
+        kern.voeg_toe(d_t, x_t, y_t - mu_raw[t])
         if t >= BURN_REGRESSIE:
             rb[t] = y_t - yhat_b[t]
             rn[t] = y_t - yhat_n[t]
+            rk[t] = y_t - yhat_k[t]
+
+    mae_n = sum(fouten_n) / len(fouten_n) if fouten_n else None
+    mae_k = sum(fouten_k) / len(fouten_k) if fouten_k else None
+    # De kern moet zich bewijzen op het evaluatievenster; zo niet, dan blijft de
+    # oude correctie staan en verandert er voor die stad en horizon niets.
+    gebruik_kern = mae_k is not None and mae_n is not None and mae_k <= mae_n
+    if gebruik_kern:
+        yhat_per_dag = {records[t][0]: yhat_k[t] for t in range(BURN_EVALUATIE, n)}
 
     ref = records[-1][0] + 1
-    klaar = [(records[s][0], rn[s], sigma[s]) for s in range(n) if rn[s] is not None]
-    paren_r = [(ewma_gewicht(ref - o), r) for o, r, _ in klaar]
-    q10 = gewogen_kwantiel(paren_r, 0.10) if len(paren_r) >= 20 else None
-    q90 = gewogen_kwantiel(paren_r, 0.90) if len(paren_r) >= 20 else None
-    zq10 = zq90 = None
-    zp = [(ewma_gewicht(ref - o), r / sg) for o, r, sg in klaar if sg]
-    c_e, d_e = sig_fit(n, ref)
-    if len(zp) >= 20 and c_e is not None:
-        zq10 = gewogen_kwantiel(zp, 0.10); zq90 = gewogen_kwantiel(zp, 0.90)
-    sps = [(ewma_gewicht(ref - records[s][0]), spreid[s]) for s in range(n) if spreid[s] is not None]
     aandelen = None
     if laatste["gew"]:
         S = sum(laatste["gew"].values())
@@ -495,21 +748,25 @@ def walk_forward(records: list) -> dict:
     uit = {
         "a": round(laatste["ab"][0], 3), "b": round(laatste["ab"][1], 3),
         "g": round(g_fit(n, ref), 3),
-        "res_q10": None if q10 is None else round(q10, 2),
-        "res_q90": None if q90 is None else round(q90, 2),
         "gewichten": aandelen,
+        "lag_dagen": lag_dagen,
         "mae_basis": round(sum(fouten_b) / len(fouten_b), 2) if fouten_b else None,
-        "mae_nieuw": round(sum(fouten_n) / len(fouten_n), 2) if fouten_n else None,
-        "crps_oud": round(sum(crps_o) / len(crps_o), 2) if crps_o else None,
-        "crps": round(sum(crps_n) / len(crps_n), 2) if crps_n else None,
+        "mae_oud": round(mae_n, 2) if mae_n is not None else None,
+        "mae_kern": round(mae_k, 2) if mae_k is not None else None,
+        "mae_nieuw": round(mae_k if gebruik_kern else mae_n, 2) if mae_n is not None else None,
         "n_eval": len(fouten_n), "n_totaal": n,
-        "dekkingsreeks": dek_o, "dekkingsreeks_s": dek_n,
-        "breedte_o": br_o, "breedte_s": br_n, "yhat_per_dag": yhat_per_dag,
+        "yhat_per_dag": yhat_per_dag,
     }
-    if zq10 is not None:
-        uit["sig_c"] = round(c_e, 3); uit["sig_d"] = round(d_e, 3)
-        uit["qz10"] = round(zq10, 3); uit["qz90"] = round(zq90, 3)
-        uit["s_gem"] = round(gewogen_gem(sps), 2) if sps else None
+    if gebruik_kern:
+        c = kern.coef()
+        if c is not None:
+            uit["kern"] = {
+                "features": KERN_FEATURES,
+                "intercept": round(c[0], 4),
+                "coef": [round(x, 5) for x in c[1]],
+                "lag_dagen": lag_dagen,
+            }
+    uit.update(_banden(records, rk if gebruik_kern else rn, spreid))
     return uit
 
 
@@ -577,7 +834,9 @@ def run(dagen: int = 150):
             if len(records) < BURN_EVALUATIE + 10:
                 print(f"h{h}: te weinig data ({len(records)})  ", end="")
                 continue
-            stad_uit[str(h)] = walk_forward(records)
+            # Op horizon h is de verste geverifieerde dag die van h+1 dagen terug:
+            # bij de run van vandaag is gisteren de laatste afgeronde dag.
+            stad_uit[str(h)] = walk_forward(records, lag_dagen=h + 1)
 
         if stad_uit:
             stad_uit["bron"] = stad.get("bron", "iem")
@@ -682,10 +941,11 @@ def run(dagen: int = 150):
                         r[h].pop(veld, None)
 
     # ── Rapport ──
-    print(f"\n  {'Stad':<15}{'hor':<4}{'basis':>7}{'+lag':>7}{'winst':>7}"
-          f"{'dekking':>9}{'crps o\u2192n':>12}{'n':>5}")
+    crps_kop = "crps o\u2192n"
+    print(f"\n  {'Stad':<15}{'hor':<4}{'oud':>7}{'kern':>7}{'winst':>7}"
+          f"{'dekking':>9}{crps_kop:>12}{'n':>5}")
     print("  " + "\u2500" * 66)
-    winsten = []
+    winsten, n_kern, n_tot = [], 0, 0
     for stad in weer.STEDEN:
         r = resultaat.get(stad["key"])
         if not r:
@@ -694,19 +954,24 @@ def run(dagen: int = 150):
             if h not in r:
                 continue
             x = r[h]
+            n_tot += 1
+            if "kern" in x:
+                n_kern += 1
             winst = None
-            if x["mae_basis"] and x["mae_nieuw"]:
-                winst = (1 - x["mae_nieuw"] / x["mae_basis"]) * 100
+            if x["mae_oud"] and x["mae_nieuw"]:
+                winst = (1 - x["mae_nieuw"] / x["mae_oud"]) * 100
                 winsten.append(winst)
             if h == "1":
+                merk = "*" if "kern" in x else " "
                 print(f"  {stad['naam']:<15}{h:<4}"
-                      f"{weer.nl(x['mae_basis']):>7}{weer.nl(x['mae_nieuw']):>7}"
+                      f"{weer.nl(x['mae_oud']):>7}{weer.nl(x['mae_kern']) + merk:>7}"
                       f"{(weer.nl(winst, 0) + '%') if winst is not None else '?':>7}"
                       f"{(weer.nl(x['dekking'] * 100, 0) + '%') if x['dekking'] is not None else '?':>9}"
                       f"{weer.nl(x.get('crps_oud')):>6}\u2192{weer.nl(x.get('crps')):<5}{x['n_eval']:>5}")
     if winsten:
         print("  " + "\u2500" * 66)
-        print(f"  Gemiddelde winst van de lagterm over alle horizonten: "
+        print(f"  Kern gekozen bij {n_kern} van de {n_tot} stad-horizonnen (*), "
+              f"gemiddelde winst tegenover de oude correctie "
               f"{weer.nl(sum(winsten) / len(winsten), 1)}%\n")
 
     behouden = [k for k in bestaand if k not in resultaat]
