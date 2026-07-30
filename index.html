@@ -1139,6 +1139,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
           gekalibreerd = true;
         }
         dagen.push({ datum: datum, verwachting: verw, p10: verw + lo, p90: verw + hi,
+                     mlx: { m: Object.assign({}, modelGem), s: sLive, lag: lagFout(s, i) },
                      n_leden: pool.length, gekalibreerd: gekalibreerd,
                      piek: (pieken && pieken[datum]) || null,
                      verbreed: gekalibreerd && (dLid10 < bLo || dLid90 > bHi) });
@@ -2110,6 +2111,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
         const u = uitkomsten[i];
         if (u.status === "fulfilled") {
           gelukt++;
+          if (window.WeerbotKoppel) { try { WeerbotKoppel.schaduwStad(s, u.value); } catch (e) {} }
           nieuwCache.per[s.key] = u.value;
           return { s: s, i: i, data: u.value, fout: null };
         }
@@ -2292,5 +2294,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
   ververs();
 })();
 </script>
+<script src="weerbot-modellen/weerbot-ml.js"></script>
+<script src="weerbot-modellen/weerbot-ml-koppel.js"></script>
 </body>
 </html>
