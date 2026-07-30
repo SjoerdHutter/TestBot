@@ -2,7 +2,7 @@
 """
 Kalibratie voor de Weerbot app.
 
-Haalt een lange backtest op (standaard 150 dagen) met vijf modellen via de
+Haalt een lange backtest op (standaard 240 dagen) met vijf modellen via de
 previous runs API van Open-Meteo, verifieert tegen de METAR waarnemingen en
 leert daaruit per stad:
 
@@ -71,6 +71,13 @@ BURN_EVALUATIE = 60    # evaluatie start hier zodat er restfoutkwantielen zijn
 KERN_FEATURES = ["mu", "lag", "spreiding"] + ["d_" + m for m in MODELLEN]
 HALFWAARDE_KERN = 60.0   # tragere vergeetsnelheid: meer coefficienten om te schatten
 ALPHA_KERN = 30.0        # ridge-straf op gestandaardiseerde features
+# De lagfeature is geen enkele dag maar een EWMA van de recente geverifieerde
+# fouten: dat dempt de meetruis van een dag en volgt een blokkade van een paar
+# dagen (hittegolf, verkeerd ingeschatte luchtmassa) net zo goed. Het venster
+# van 24 dagen is precies wat de app live aan verificatie bijhoudt, zodat de
+# backtest niets gebruikt wat de browser niet heeft.
+EWMA_LAG_HALF = 8.0
+EWMA_LAG_VENSTER = 24
 
 
 # ── Ophalen ───────────────────────────────────────────────────────────────────
@@ -526,13 +533,17 @@ class OnlineRidge:
 
 
 def lag_van(resid: dict, o: int, lag_dagen: int) -> float:
-    """De verste nog verse restfout: de recentste dag in het venster
-    [o-lag_dagen, o-lag_dagen-2]. Nul als er niets bekend is."""
-    for stap in range(lag_dagen, lag_dagen + 3):
+    """EWMA (halfwaarde EWMA_LAG_HALF) van de restfouten die op de doeldag o al
+    geverifieerd zijn: dagen o-lag_dagen tot en met o-EWMA_LAG_VENSTER.
+    Nul als er niets bekend is."""
+    W = S = 0.0
+    for stap in range(lag_dagen, EWMA_LAG_VENSTER + 1):
         r = resid.get(o - stap)
         if r is not None:
-            return r
-    return 0.0
+            w = 0.5 ** (stap / EWMA_LAG_HALF)
+            W += w
+            S += w * r
+    return S / W if W > 0 else 0.0
 
 
 def pstdev_van(fc: dict):
@@ -772,7 +783,7 @@ def walk_forward(records: list, lag_dagen: int = LAG_DAGEN) -> dict:
 
 # ── Hoofdprogramma ────────────────────────────────────────────────────────────
 
-def run(dagen: int = 150):
+def run(dagen: int = 240):
     d2 = date.today() - timedelta(days=2)   # gisteren kan nog METAR vertraging hebben
     d1 = d2 - timedelta(days=dagen)
     print(f"\n  Kalibratie over {dagen} dagen ({d1} tot {d2}), 5 modellen, walk forward.\n")
@@ -998,7 +1009,7 @@ def run(dagen: int = 150):
 
 
 if __name__ == "__main__":
-    n = 150
+    n = 240
     if len(sys.argv) > 1:
         try:
             n = int(sys.argv[1])

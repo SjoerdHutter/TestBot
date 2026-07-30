@@ -380,7 +380,7 @@
       <input class="zoek-invoer" id="zoekInvoer" type="text" placeholder="Stadsnaam, bijvoorbeeld Brugge" autocomplete="off">
       <button class="zoek-knop" id="zoekKnop">Zoek</button>
     </div>
-    <div class="zoek-uitleg">Na het toevoegen draait er automatisch een backtest van 140 dagen: de app zoekt het dichtstbijzijnde weerstation en leert daar de gewichten, correctie en band uit. Lukt dat niet, dan valt hij terug op de ERA5 reanalyse. Kies bij het resultaat de eenheid.</div>
+    <div class="zoek-uitleg">Na het toevoegen draait er automatisch een backtest van 200 dagen: de app zoekt het dichtstbijzijnde weerstation en leert daar de gewichten, correctie en band uit. Lukt dat niet, dan valt hij terug op de ERA5 reanalyse. Kies bij het resultaat de eenheid.</div>
     <div class="zoek-resultaten" id="zoekResultaten"></div>
   </div>
 
@@ -576,7 +576,9 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
   function alleSteden() { return CONFIG.steden.concat(eigenSteden()); }
 
   /* ── Automatische backtest voor zelf toegevoegde steden ── */
-  const KAL = { dagen: 140, half: 14, burnG: 10, burnR: 30, burnE: 60, krimp: 30, ridge: 0.25,
+  /* dagen: 200 in plaats van 140 sinds de kern een halfwaardetijd van 60 dagen
+     heeft; zelfde aantal aanroepen, alleen een langere periode per aanroep. */
+  const KAL = { dagen: 200, half: 14, burnG: 10, burnR: 30, burnE: 60, krimp: 30, ridge: 0.25,
                 maxAfstand: 80, halfKern: 60, alphaKern: 30 };
   /* De deterministische APIs kennen AIFS als ecmwf_aifs025_single; onder de naam
      ecmwf_aifs025 kwam er nooit een reeks terug. Lukt de voorkeursnaam niet, dan
@@ -1216,7 +1218,7 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
 
         // spreiding tussen de modelsystemen: live onzekerheidsproxy
         const sLive = Object.keys(kort).length >= 2 ? kernSpreiding(kort) : null;
-        const lag = lagFout(s, i, lagDagenVan(hp, i));
+        const lag = lagVoor(s, i, hp);
 
         // correctiekern, lagterm en gekalibreerde band
         let verw = muRuw, lo = dLid10, hi = dLid90, gekalibreerd = false;
@@ -1320,8 +1322,8 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     if (hp && hp.lag_dagen) return hp.lag_dagen;
     return LAGV;
   }
-  /* De recentste geverifieerde fout in het venster [doel-lag, doel-lag-2],
-     hetzelfde venster als waarop de kalibratie is gefit. */
+  /* De recentste geverifieerde fout in het venster [doel-lag, doel-lag-2]:
+     de vorm waarop de oude g-term is gefit. */
   function lagFout(s, h, lagDagen) {
     const v2 = VERIF[s.key];
     if (!v2 || !v2.rijen) return 0;
@@ -1333,6 +1335,28 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
       if (r.datum <= boven && r.datum >= onder && r.per[h] !== undefined) return r.per[h];
     }
     return 0;
+  }
+
+  /* De lagfeature van de kern: EWMA over de geverifieerde fouten van de
+     laatste 24 dagen, exact zoals kernLag dat in de backtest doet. */
+  function lagFoutEwma(s, h, lagDagen) {
+    const v2 = VERIF[s.key];
+    if (!v2 || !v2.rijen) return 0;
+    const doel = isoInTz(s.tz, h);
+    const resid = {};
+    const doelO = Math.round(Date.parse(doel + "T00:00:00Z") / 86400000);
+    v2.rijen.forEach(function (r) {
+      if (r.per[h] === undefined) return;
+      resid[Math.round(Date.parse(r.datum + "T00:00:00Z") / 86400000)] = r.per[h];
+    });
+    return kernLag(resid, doelO, lagDagen);
+  }
+
+  /* De lag die bij deze parameters hoort: kern-parameters zijn op de EWMA
+     gefit, oudere op de enkele fout. */
+  function lagVoor(s, h, hp) {
+    const d = lagDagenVan(hp, h);
+    return hp && hp.kern ? lagFoutEwma(s, h, d) : lagFout(s, h, d);
   }
 
   /* ── kern:start ── gedeelde rekenkern, spiegelbeeld van bot/kalibratie.py.
@@ -1423,13 +1447,20 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
     };
   }
 
-  /* De recentste restfout in het venster [o-lag, o-lag-2]. */
+  /* EWMA (halfwaarde 8 dagen) van de restfouten die op doeldag o al
+     geverifieerd zijn: dagen o-lag tot en met o-24. Het venster van 24 dagen
+     is wat de app live aan verificatie bijhoudt. */
+  const KERN_LAG_HALF = 8, KERN_LAG_VENSTER = 24;
   function kernLag(resid, o, lagDagen) {
-    for (let stap = lagDagen; stap <= lagDagen + 2; stap++) {
+    let W = 0, S = 0;
+    for (let stap = lagDagen; stap <= KERN_LAG_VENSTER; stap++) {
       const r = resid[o - stap];
-      if (r !== undefined) return r;
+      if (r !== undefined) {
+        const w = Math.pow(0.5, stap / KERN_LAG_HALF);
+        W += w; S += w * r;
+      }
     }
-    return 0;
+    return W > 0 ? S / W : 0;
   }
 
   function kernSpreiding(kort) {
@@ -1545,11 +1576,19 @@ const CONFIG = {"nws_gewicht": 0.25, "steden": [{"key": "NYC", "naam": "New York
           const hp = pr ? (pr[String(h)] || pr["1"]) : null;
           if (!fc[h][dag]) return;
           const lagD = lagDagenVan(hp, h);
-          const boven = isoMin(dag, lagD), onder = isoMin(dag, lagD + 2);
-          let lag = 0;
           const kk = ketting[h];
-          for (let i2 = kk.length - 1; i2 >= 0; i2--) {
-            if (kk[i2][0] <= boven) { if (kk[i2][0] >= onder) lag = kk[i2][1]; break; }
+          let lag = 0;
+          if (hp && hp.kern) {
+            const resid = {};
+            kk.forEach(function (p2) {
+              resid[Math.round(Date.parse(p2[0] + "T00:00:00Z") / 86400000)] = p2[1];
+            });
+            lag = kernLag(resid, Math.round(Date.parse(dag + "T00:00:00Z") / 86400000), lagD);
+          } else {
+            const boven = isoMin(dag, lagD), onder = isoMin(dag, lagD + 2);
+            for (let i2 = kk.length - 1; i2 >= 0; i2--) {
+              if (kk[i2][0] <= boven) { if (kk[i2][0] >= onder) lag = kk[i2][1]; break; }
+            }
           }
           const p = kernVoorspel(hp, fc[h][dag], lag);
           if (p === null) return;
