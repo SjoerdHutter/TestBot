@@ -793,6 +793,27 @@ def walk_forward(records: list, lag_dagen: int = LAG_DAGEN) -> dict:
 
 # ── Hoofdprogramma ────────────────────────────────────────────────────────────
 
+def laad_vorige_params():
+    """De parameters van de vorige ronde, of None. In de repository staat alleen
+    app_params.js, dus als het json-bestand ontbreekt wordt de js-variant
+    uitgepakt. Steden die deze keer mislukken houden zo hun oude parameters."""
+    map_uit = uitvoermap()
+    pad = map_uit / "app_params.json"
+    if pad.exists():
+        try:
+            return json.load(open(pad))
+        except Exception:
+            pass
+    pad = map_uit / "app_params.js"
+    if pad.exists():
+        try:
+            tekst = pad.read_text()
+            return json.loads(tekst[tekst.index("=") + 1:].strip().rstrip(";"))
+        except Exception:
+            pass
+    return None
+
+
 def run(dagen: int = 240):
     d2 = date.today() - timedelta(days=2)   # gisteren kan nog METAR vertraging hebben
     d1 = d2 - timedelta(days=dagen)
@@ -800,15 +821,11 @@ def run(dagen: int = 240):
 
     bestaand = {}
     oude_factor = None
-    pad = uitvoermap() / "app_params.json"
-    if pad.exists():
-        try:
-            vorig = json.load(open(pad))
-            bestaand = vorig.get("steden", {})
-            oude_factor = vorig.get("band_factor")
-            print(f"    bestaand bestand gevonden met {len(bestaand)} steden\n")
-        except Exception:
-            pass
+    vorig = laad_vorige_params()
+    if vorig:
+        bestaand = vorig.get("steden", {})
+        oude_factor = vorig.get("band_factor")
+        print(f"    bestaand bestand gevonden met {len(bestaand)} steden\n")
 
     enslog = laad_log(uitvoermap() / "logs" / "ensemble_log.csv")
     nwslog = laad_log(uitvoermap() / "logs" / "nws_log.csv")
